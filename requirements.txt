@@ -1,0 +1,5 @@
+PyQt6>=6.9,<7
+# Use upstream pygame where wheels are broadly available.
+pygame>=2.6,<3; python_version < "3.14"
+# Python 3.14+ may not have compatible upstream pygame wheels; pygame-ce is drop-in (`import pygame`).
+pygame-ce>=2.5,<3; python_version >= "3.14"

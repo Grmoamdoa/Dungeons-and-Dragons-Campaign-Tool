@@ -1,0 +1,9 @@
+.venv/
+.venv-packaging/
+__pycache__/
+*.pyc
+.DS_Store
+*.dcp
+build/
+dist/
+packaging/output/
