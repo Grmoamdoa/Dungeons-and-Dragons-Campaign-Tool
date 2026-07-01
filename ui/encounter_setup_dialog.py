@@ -11,7 +11,8 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
     QLabel, QPushButton, QWidget, QSpinBox, QCheckBox, QFileDialog,
     QDialogButtonBox, QApplication, QSizePolicy,
-    QListWidget, QListWidgetItem, QMenu, QMessageBox, QSpacerItem
+    QListWidget, QListWidgetItem, QMenu, QMessageBox, QSpacerItem, QStyle,
+    QScrollArea, QComboBox, QColorDialog
 )
 from PyQt6.QtGui import (
     QPixmap, QPainter, QPen, QColor, QPaintEvent, QIcon, QDrag, QMouseEvent,
@@ -25,21 +26,32 @@ from PyQt6.QtCore import (
 # --- Constants and Import handling ---
 # Shared constant for token visual size in preview and drag
 PREVIEW_TOKEN_DISPLAY_SIZE = QSize(40, 40)
+PREVIEW_MAP_DISPLAY_SIZE = QSize(88, 56)
 PREVIEW_TOKEN_CELL_FILL_RATIO = 0.9
 PREVIEW_MIN_ZOOM = 1.0
 PREVIEW_MAX_ZOOM = 8.0
 PREVIEW_ZOOM_FACTOR = 1.15
 DEFAULT_PROFILE_TOKEN_SIZE_SQUARES = 1
 MAX_PROFILE_TOKEN_SIZE_SQUARES = 10
+MAP_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 try:
     MAX_GRID_OFFSET = 500 
-    from .battle_map_widget import DEFAULT_MAP_PATH, DEFAULT_TOKEN_MAX_HP, DEFAULT_TOKEN_SPEED_FT
-    from .asset_bin import ASSET_PATH_MIME_TYPE, TOKEN_EXTENSIONS, AssetBinWidget 
+    from .battle_map_widget import (
+        DEFAULT_MAP_PATH, DEFAULT_TOKEN_MAX_HP, DEFAULT_TOKEN_SPEED_FT,
+        ALL_FOG_TEXTURE_PATH,
+        DEFAULT_FOG_COLOR, DEFAULT_FOG_MODE, FOG_MODE_ALL, FOG_MODE_HIDE_TOKEN,
+        FOG_MODE_LABELS, BattleMapWidget,
+    )
+    from .asset_bin import ASSET_PATH_MIME_TYPE, TOKEN_EXTENSIONS, AUDIO_EXTENSIONS, AssetBinWidget 
 except ImportError as e:
     print(f"Warning: EncounterSetupDialog could not import dependencies: {e}")
     MAX_GRID_OFFSET = 500; DEFAULT_MAP_PATH = ""; ASSET_PATH_MIME_TYPE = "application/x-dnd-asset-path"; TOKEN_EXTENSIONS = ['.png', '.gif', '.webp']
+    AUDIO_EXTENSIONS = ['.mp3', '.ogg', '.wav', '.flac']
     DEFAULT_TOKEN_MAX_HP = 10; DEFAULT_TOKEN_SPEED_FT = 30
+    ALL_FOG_TEXTURE_PATH = ""; DEFAULT_FOG_COLOR = "#8f9297"; DEFAULT_FOG_MODE = "hide_token"; FOG_MODE_HIDE_TOKEN = "hide_token"; FOG_MODE_ALL = "all"
+    FOG_MODE_LABELS = {FOG_MODE_HIDE_TOKEN: "Hide Token", FOG_MODE_ALL: "All"}
+    BattleMapWidget = None
     if TYPE_CHECKING: AssetBinWidget = QWidget 
     else: AssetBinWidget = type("AssetBinWidget", (QWidget,), {})
 
@@ -58,6 +70,7 @@ from .token_footprint_utils import (
     get_footprint_dimensions,
     normalize_visual_fit_mode,
 )
+from .window_geometry import install_dialog_geometry_persistence
 
 
 # --- Custom DraggableTokenListWidget Class ---
@@ -98,6 +111,139 @@ class DraggableTokenListWidget(QListWidget):
         # No super().startDrag() needed as we handled it.
 
 
+class DraggableMapImageListWidget(QListWidget):
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(False)
+        self.setDropIndicatorShown(False)
+        self.setViewMode(QListWidget.ViewMode.IconMode)
+        self.setIconSize(PREVIEW_MAP_DISPLAY_SIZE)
+        self.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.setSpacing(5)
+
+    def startDrag(self, supportedActions: Qt.DropAction):
+        items = self.selectedItems()
+        if not items:
+            return
+
+        item = items[0]
+        asset_path = item.data(Qt.ItemDataRole.UserRole)
+        if not (asset_path and isinstance(asset_path, str)):
+            return
+
+        mime_data = QMimeData()
+        mime_data.setData(ASSET_PATH_MIME_TYPE, QByteArray(asset_path.encode('utf-8')))
+
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+
+        icon = item.icon()
+        if not icon.isNull():
+            pixmap = icon.pixmap(self.iconSize())
+            if not pixmap.isNull():
+                drag.setPixmap(pixmap)
+                drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+
+        drag.exec(Qt.DropAction.CopyAction, Qt.DropAction.CopyAction)
+
+
+class MapImageDropField(QWidget):
+    mapDropped = pyqtSignal(str)
+
+    def __init__(self, label: QLabel, browse_button: QPushButton, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._label = label
+        self._browse_button = browse_button
+        self._drop_hint = QLabel("Drop map image here")
+        self._drop_hint.setStyleSheet("color: #C8D8E8; font-weight: 600;")
+        self._drop_hint.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._drop_icon = QLabel()
+        self._drop_icon.setPixmap(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown).pixmap(QSize(18, 18))
+        )
+        self._base_style = (
+            "QWidget#MapImageDropField {"
+            "border: 1px dashed #707070;"
+            "border-radius: 4px;"
+            "background-color: rgba(255, 255, 255, 0.03);"
+            "}"
+        )
+        self._hover_style = (
+            "QWidget#MapImageDropField {"
+            "border: 1px dashed #8FC7FF;"
+            "border-radius: 4px;"
+            "background-color: rgba(143, 199, 255, 0.12);"
+            "}"
+        )
+
+        self.setObjectName("MapImageDropField")
+        self.setAcceptDrops(True)
+        self.setToolTip("Drop a map image here or browse for one.")
+        self.setStyleSheet(self._base_style)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(2)
+        text_layout.addWidget(self._drop_hint)
+        text_layout.addWidget(self._label)
+        layout.addWidget(self._drop_icon)
+        layout.addLayout(text_layout, 1)
+        layout.addWidget(self._browse_button)
+
+    def _first_supported_local_file(self, event) -> str:
+        mime_data = event.mimeData()
+        if mime_data.hasFormat(ASSET_PATH_MIME_TYPE):
+            try:
+                asset_path = bytes(mime_data.data(ASSET_PATH_MIME_TYPE)).decode('utf-8')
+            except UnicodeDecodeError:
+                asset_path = ""
+            if (
+                asset_path
+                and os.path.isfile(asset_path)
+                and os.path.splitext(asset_path)[1].lower() in MAP_IMAGE_EXTENSIONS
+            ):
+                return asset_path
+        if not mime_data.hasUrls():
+            return ""
+        for url in mime_data.urls():
+            path = url.toLocalFile()
+            if not path or not os.path.isfile(path):
+                continue
+            if os.path.splitext(path)[1].lower() in MAP_IMAGE_EXTENSIONS:
+                return path
+        return ""
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if self._first_supported_local_file(event):
+            event.acceptProposedAction()
+            self.setStyleSheet(self._hover_style)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent):
+        if self._first_supported_local_file(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent):
+        self.setStyleSheet(self._base_style)
+        event.accept()
+
+    def dropEvent(self, event: QDropEvent):
+        self.setStyleSheet(self._base_style)
+        path = self._first_supported_local_file(event)
+        if path:
+            self.mapDropped.emit(path)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
 # --- MapPreviewLabel Class ---
 class MapPreviewLabel(QLabel):
     tokenPlaced = pyqtSignal(str, int, int) 
@@ -112,8 +258,16 @@ class MapPreviewLabel(QLabel):
         self._grid_offset_x: int = 0
         self._grid_offset_y: int = 0
         self._placed_tokens: List[Dict[str, Union[str, int]]] = []
+        self._fog_squares: Dict[Tuple[int, int], Dict[str, Union[str, int]]] = {}
+        self._fog_add_enabled = False
+        self._fog_mode = DEFAULT_FOG_MODE
+        self._fog_color = DEFAULT_FOG_COLOR
+        self._fog_drag_start_grid: Optional[Tuple[int, int]] = None
+        self._fog_drag_current_grid: Optional[Tuple[int, int]] = None
+        self._fog_drag_mode: Optional[str] = None
         self._token_pixmap_cache: Dict[str, Optional[QPixmap]] = {}
         self._scaled_token_pixmap_cache: Dict[Tuple[str, int], Optional[QPixmap]] = {}
+        self._all_fog_texture: Optional[QPixmap] = None
         self._zoom_level: float = 1.0
         self._view_center_map: QPointF = QPointF(0.0, 0.0)
         self._is_panning: bool = False
@@ -238,6 +392,168 @@ class MapPreviewLabel(QLabel):
         for token_info in self._placed_tokens:
             self._load_token_pixmap(str(token_info['path']))
         self.update()
+
+    def updateFogSquares(self, fog_squares: List[Dict[str, Union[str, int]]]):
+        self._fog_squares = {}
+        if BattleMapWidget is not None:
+            self._fog_squares = BattleMapWidget.normalize_fog_squares(fog_squares)
+        elif isinstance(fog_squares, list):
+            for entry in fog_squares:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    grid_x = int(entry.get("grid_x"))
+                    grid_y = int(entry.get("grid_y"))
+                except (TypeError, ValueError):
+                    continue
+                self._fog_squares[(grid_x, grid_y)] = {
+                    "grid_x": grid_x,
+                    "grid_y": grid_y,
+                    "mode": str(entry.get("mode", DEFAULT_FOG_MODE)),
+                    "color": str(entry.get("color", DEFAULT_FOG_COLOR)),
+                }
+        self.update()
+
+    def getFogSquares(self) -> List[Dict[str, Union[str, int]]]:
+        if BattleMapWidget is not None:
+            return BattleMapWidget.serialize_fog_squares(self._fog_squares)
+        return [dict(entry) for entry in self._fog_squares.values()]
+
+    def setFogToolSettings(self, enabled: bool, mode: str, color: str):
+        self._fog_add_enabled = bool(enabled)
+        self._fog_mode = BattleMapWidget.normalize_fog_mode(mode) if BattleMapWidget is not None else str(mode or DEFAULT_FOG_MODE)
+        self._fog_color = BattleMapWidget.normalize_fog_color(color) if BattleMapWidget is not None else str(color or DEFAULT_FOG_COLOR)
+        self._fog_drag_start_grid = None
+        self._fog_drag_current_grid = None
+        self._fog_drag_mode = None
+        self.setCursor(Qt.CursorShape.CrossCursor if self._fog_add_enabled else Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def _iter_grid_rect_cells(self, start_grid: Tuple[int, int], end_grid: Tuple[int, int]):
+        min_x, max_x = sorted((int(start_grid[0]), int(end_grid[0])))
+        min_y, max_y = sorted((int(start_grid[1]), int(end_grid[1])))
+        for gx in range(min_x, max_x + 1):
+            for gy in range(min_y, max_y + 1):
+                yield gx, gy
+
+    def _paint_fog_rect(self, start_grid: Tuple[int, int], end_grid: Tuple[int, int]) -> bool:
+        changed = False
+        for gx, gy in self._iter_grid_rect_cells(start_grid, end_grid):
+            entry = {
+                "grid_x": gx,
+                "grid_y": gy,
+                "mode": self._fog_mode,
+                "color": self._fog_color,
+            }
+            if self._fog_squares.get((gx, gy)) != entry:
+                self._fog_squares[(gx, gy)] = entry
+                changed = True
+        return changed
+
+    def _remove_fog_at_grid(self, grid_coords: Tuple[int, int]) -> bool:
+        return self._fog_squares.pop((int(grid_coords[0]), int(grid_coords[1])), None) is not None
+
+    def _remove_fog_rect(self, start_grid: Tuple[int, int], end_grid: Tuple[int, int]) -> bool:
+        changed = False
+        for cell in self._iter_grid_rect_cells(start_grid, end_grid):
+            if self._fog_squares.pop(cell, None) is not None:
+                changed = True
+        return changed
+
+    def _load_all_fog_texture(self) -> Optional[QPixmap]:
+        if self._all_fog_texture is not None:
+            return self._all_fog_texture
+        texture = QPixmap(ALL_FOG_TEXTURE_PATH) if ALL_FOG_TEXTURE_PATH else QPixmap()
+        self._all_fog_texture = texture if not texture.isNull() else None
+        return self._all_fog_texture
+
+    def _draw_fog_texture_in_rect(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        color: QColor,
+        opacity: int,
+        use_image_texture: bool = False,
+    ) -> None:
+        if use_image_texture:
+            texture = self._load_all_fog_texture()
+            if texture is not None and not texture.isNull():
+                painter.drawPixmap(rect, texture, QRectF(texture.rect()))
+                tint = QColor(color)
+                painter.save()
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply)
+                tint.setAlpha(165)
+                painter.fillRect(rect, tint)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                tint.setAlpha(58)
+                painter.fillRect(rect, tint)
+                painter.restore()
+                return
+
+        fog_color = QColor(color)
+        fog_color.setAlpha(max(0, min(255, opacity)))
+        painter.fillRect(rect, fog_color)
+        painter.setPen(QPen(QColor(255, 255, 255, max(20, min(76, opacity // 3))), max(1, int(rect.width() * 0.025))))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for i in range(3):
+            inset = rect.width() * (0.12 + i * 0.08)
+            painter.drawArc(
+                rect.adjusted(
+                    inset,
+                    rect.height() * (0.16 + i * 0.07),
+                    -inset * 0.55,
+                    -rect.height() * (0.18 + i * 0.04),
+                ),
+                20 * 16,
+                150 * 16,
+            )
+
+    def _draw_fog_squares(self, painter: QPainter, draw_rect: QRect, scale: float) -> None:
+        if not self._fog_squares or self._grid_size <= 0 or scale <= 1e-6:
+            return
+        for (gx, gy), entry in self._fog_squares.items():
+            cell_map_x = gx * self._grid_size + self._grid_offset_x
+            cell_map_y = gy * self._grid_size + self._grid_offset_y
+            rect = QRectF(
+                draw_rect.left() + (cell_map_x * scale),
+                draw_rect.top() + (cell_map_y * scale),
+                self._grid_size * scale,
+                self._grid_size * scale,
+            )
+            if not draw_rect.intersects(rect.toRect()):
+                continue
+            color = QColor(str(entry.get("color", DEFAULT_FOG_COLOR)))
+            if not color.isValid():
+                color = QColor(DEFAULT_FOG_COLOR)
+            self._draw_fog_texture_in_rect(
+                painter,
+                rect,
+                color,
+                255 if str(entry.get("mode", DEFAULT_FOG_MODE)) == FOG_MODE_ALL else 118,
+                use_image_texture=(str(entry.get("mode", DEFAULT_FOG_MODE)) == FOG_MODE_ALL),
+            )
+
+    def _draw_fog_drag_preview(self, painter: QPainter, draw_rect: QRect, scale: float) -> None:
+        if not self._fog_add_enabled or self._fog_drag_start_grid is None or self._fog_drag_current_grid is None:
+            return
+        if self._fog_drag_mode == "remove":
+            color = QColor(255, 70, 70, 70)
+            pen_color = QColor(255, 70, 70, 210)
+        else:
+            color = QColor(self._fog_color)
+            color.setAlpha(85)
+            pen_color = QColor(255, 255, 255, 180)
+        painter.setPen(QPen(pen_color, 1))
+        painter.setBrush(color)
+        for gx, gy in self._iter_grid_rect_cells(self._fog_drag_start_grid, self._fog_drag_current_grid):
+            cell_map_x = gx * self._grid_size + self._grid_offset_x
+            cell_map_y = gy * self._grid_size + self._grid_offset_y
+            painter.drawRect(QRectF(
+                draw_rect.left() + (cell_map_x * scale),
+                draw_rect.top() + (cell_map_y * scale),
+                self._grid_size * scale,
+                self._grid_size * scale,
+            ))
 
     def getZoomLevel(self) -> float:
         return self._zoom_level
@@ -469,6 +785,9 @@ class MapPreviewLabel(QLabel):
                     draw_rect_f = QRectF(0, 0, float(scaled_size.width()), float(scaled_size.height()))
                     draw_rect_f.moveCenter(QRectF(token_draw_rect).center())
                 painter.drawPixmap(draw_rect_f, token_pixmap, QRectF(token_pixmap.rect()))
+
+        self._draw_fog_squares(painter, draw_rect, scale)
+        self._draw_fog_drag_preview(painter, draw_rect, scale)
         
         # --- Draw Drag Hover Highlight ---
         if self._drag_hover_grid_cell and draw_rect and scale > 1e-6: # Ensure draw_rect is valid
@@ -587,6 +906,23 @@ class MapPreviewLabel(QLabel):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
+        if self._fog_add_enabled:
+            grid_coords = self._get_grid_coords_from_pos(event.pos())
+            if grid_coords:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._fog_drag_start_grid = grid_coords
+                    self._fog_drag_current_grid = grid_coords
+                    self._fog_drag_mode = "paint"
+                    self.update()
+                    event.accept()
+                    return
+                if event.button() == Qt.MouseButton.RightButton:
+                    self._fog_drag_start_grid = grid_coords
+                    self._fog_drag_current_grid = grid_coords
+                    self._fog_drag_mode = "remove"
+                    self.update()
+                    event.accept()
+                    return
         if event.button() == Qt.MouseButton.LeftButton:
             grid_coords = self._get_grid_coords_from_pos(event.pos())
             if grid_coords:
@@ -596,6 +932,13 @@ class MapPreviewLabel(QLabel):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        if self._fog_add_enabled and self._fog_drag_start_grid is not None and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
+            grid_coords = self._get_grid_coords_from_pos(event.pos())
+            if grid_coords and grid_coords != self._fog_drag_current_grid:
+                self._fog_drag_current_grid = grid_coords
+                self.update()
+            event.accept()
+            return
         if self._is_panning and not self._pixmap.isNull():
             draw_rect, scale = self._get_map_draw_rect_and_scale()
             if draw_rect and scale > 1e-6:
@@ -609,6 +952,18 @@ class MapPreviewLabel(QLabel):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton) and self._fog_add_enabled and self._fog_drag_start_grid is not None:
+            end_grid = self._get_grid_coords_from_pos(event.pos()) or self._fog_drag_current_grid or self._fog_drag_start_grid
+            if self._fog_drag_mode == "remove":
+                self._remove_fog_rect(self._fog_drag_start_grid, end_grid)
+            else:
+                self._paint_fog_rect(self._fog_drag_start_grid, end_grid)
+            self._fog_drag_start_grid = None
+            self._fog_drag_current_grid = None
+            self._fog_drag_mode = None
+            self.update()
+            event.accept()
+            return
         if self._is_panning and event.button() == Qt.MouseButton.MiddleButton:
             self._is_panning = False
             self.unsetCursor()
@@ -652,6 +1007,15 @@ class EncounterSetupDialog(QDialog):
         self._grid_size: int = settings.get("grid_size", 50)
         self._grid_offset_x: int = settings.get("grid_offset_x", 0)
         self._grid_offset_y: int = settings.get("grid_offset_y", 0)
+        self._fog_mode: str = DEFAULT_FOG_MODE
+        self._fog_color: str = DEFAULT_FOG_COLOR
+        self._fog_squares: List[Dict[str, Union[str, int]]] = []
+        if BattleMapWidget is not None:
+            self._fog_squares = BattleMapWidget.serialize_fog_squares(
+                BattleMapWidget.normalize_fog_squares(settings.get("fog_squares", []))
+            )
+        elif isinstance(settings.get("fog_squares", []), list):
+            self._fog_squares = [dict(entry) for entry in settings.get("fog_squares", []) if isinstance(entry, dict)]
         self._placed_tokens: List[Dict[str, Union[str, int]]] = []
         raw_tokens = settings.get("tokens", [])
         if isinstance(raw_tokens, list):
@@ -692,21 +1056,59 @@ class EncounterSetupDialog(QDialog):
         preview_layout.addWidget(self._preview_label)
         top_h_layout.addWidget(preview_group, 2) 
 
-        right_v_layout = QVBoxLayout()
-        map_file_group = QGroupBox("Map Image"); map_file_layout = QHBoxLayout(map_file_group)
+        right_scroll_area = QScrollArea()
+        right_scroll_area.setWidgetResizable(True)
+        right_scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        right_scroll_area.setAutoFillBackground(False)
+        right_scroll_area.viewport().setAutoFillBackground(False)
+        right_scroll_area.setStyleSheet(
+            "QScrollArea { background: transparent; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        right_panel = QWidget()
+        right_panel.setAutoFillBackground(False)
+        right_v_layout = QVBoxLayout(right_panel)
+        right_v_layout.setContentsMargins(0, 0, 0, 0)
+        map_file_group = QGroupBox("Map Image"); map_file_layout = QVBoxLayout(map_file_group)
         self._map_path_label = QLabel("No map selected."); self._map_path_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred); self._map_path_label.setWordWrap(True)
-        browse_map_button = QPushButton("Browse Map..."); map_file_layout.addWidget(self._map_path_label); map_file_layout.addWidget(browse_map_button)
+        browse_map_button = QPushButton("Browse Map...")
+        self._map_drop_field = MapImageDropField(self._map_path_label, browse_map_button)
+        map_file_layout.addWidget(self._map_drop_field)
+        map_asset_group = QGroupBox("Battle Map Assets (Drag or Double-Click to Use)")
+        map_asset_layout = QVBoxLayout(map_asset_group)
+        self._map_asset_list = DraggableMapImageListWidget()
+        self._map_asset_list.setIconSize(PREVIEW_MAP_DISPLAY_SIZE)
+        self._map_asset_list.setMinimumHeight(120)
+        map_asset_layout.addWidget(self._map_asset_list)
+        map_file_layout.addWidget(map_asset_group)
         right_v_layout.addWidget(map_file_group)
         grid_group = QGroupBox("Grid Settings"); grid_form_layout = QFormLayout(grid_group); grid_form_layout.setSpacing(8)
         self._show_grid_checkbox = QCheckBox(); grid_form_layout.addRow("Show Grid:", self._show_grid_checkbox)
         self._grid_size_spinbox = QSpinBox(); self._grid_size_spinbox.setRange(10, 500); self._grid_size_spinbox.setSingleStep(1); self._grid_size_spinbox.setSuffix(" px"); grid_form_layout.addRow("Size:", self._grid_size_spinbox)
         self._grid_offset_x_spinbox = QSpinBox(); self._grid_offset_x_spinbox.setRange(-MAX_GRID_OFFSET, MAX_GRID_OFFSET); self._grid_offset_x_spinbox.setSingleStep(1); self._grid_offset_x_spinbox.setSuffix(" px"); grid_form_layout.addRow("Offset X:", self._grid_offset_x_spinbox)
         self._grid_offset_y_spinbox = QSpinBox(); self._grid_offset_y_spinbox.setRange(-MAX_GRID_OFFSET, MAX_GRID_OFFSET); self._grid_offset_y_spinbox.setSingleStep(1); self._grid_offset_y_spinbox.setSuffix(" px"); grid_form_layout.addRow("Offset Y:", self._grid_offset_y_spinbox)
+        self._add_fog_checkbox = QCheckBox(); grid_form_layout.addRow("Add Fog:", self._add_fog_checkbox)
+        self._fog_mode_combo = QComboBox()
+        self._fog_mode_combo.addItem(FOG_MODE_LABELS[FOG_MODE_HIDE_TOKEN], FOG_MODE_HIDE_TOKEN)
+        self._fog_mode_combo.addItem(FOG_MODE_LABELS[FOG_MODE_ALL], FOG_MODE_ALL)
+        self._fog_mode_combo.setStyleSheet(
+            "QComboBox { background-color: #4b5563; color: #ffffff; border: 1px solid #707070; padding: 4px 8px; }"
+            "QComboBox QAbstractItemView { background-color: #374151; color: #ffffff; selection-background-color: #2563eb; }"
+        )
+        grid_form_layout.addRow("Fog Type:", self._fog_mode_combo)
+        self._fog_color_button = QPushButton("Choose Color")
+        grid_form_layout.addRow("Fog Color:", self._fog_color_button)
         right_v_layout.addWidget(grid_group)
         music_group = QGroupBox("Battle Music"); music_v_layout = QVBoxLayout(music_group); music_h_layout = QHBoxLayout()
         self._battle_music_label = QLabel("Music: None"); self._battle_music_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred); self._battle_music_label.setWordWrap(True)
         select_music_button = QPushButton("Select Music..."); remove_music_button = QPushButton("Remove"); remove_music_button.setToolTip("Clear selected battle music")
         music_h_layout.addWidget(self._battle_music_label); music_h_layout.addWidget(select_music_button); music_h_layout.addWidget(remove_music_button); music_v_layout.addLayout(music_h_layout)
+        music_asset_group = QGroupBox("Music Assets (Double-Click to Use)")
+        music_asset_layout = QVBoxLayout(music_asset_group)
+        self._music_asset_list = QListWidget()
+        self._music_asset_list.setMinimumHeight(90)
+        music_asset_layout.addWidget(self._music_asset_list)
+        music_v_layout.addWidget(music_asset_group)
         music_volume_layout = QFormLayout()
         self._battle_music_volume_spinbox = QSpinBox()
         self._battle_music_volume_spinbox.setRange(0, 100)
@@ -719,27 +1121,35 @@ class EncounterSetupDialog(QDialog):
         music_v_layout.addLayout(music_volume_layout)
         right_v_layout.addWidget(music_group)
         token_group = QGroupBox("Available Tokens (Drag to Preview / Right-Click to Edit Profile)"); token_layout = QVBoxLayout(token_group)
-        
+        browse_token_button = QPushButton("Browse Token...")
+        browse_token_button.setToolTip("Add token image files to the project asset bin.")
+        token_layout.addWidget(browse_token_button)
         self._token_asset_list = DraggableTokenListWidget() 
         self._token_asset_list.setIconSize(PREVIEW_TOKEN_DISPLAY_SIZE) # Use shared constant
         self._token_asset_list.setMinimumHeight(150) 
         self._token_asset_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         token_layout.addWidget(self._token_asset_list)
         right_v_layout.addWidget(token_group, 1) 
-        right_v_layout.addStretch(0) 
-        top_h_layout.addLayout(right_v_layout, 1) 
+        right_v_layout.addStretch(0)
+        right_scroll_area.setWidget(right_panel)
+        top_h_layout.addWidget(right_scroll_area, 1)
         main_layout.addLayout(top_h_layout)
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         main_layout.addWidget(button_box)
 
         browse_map_button.clicked.connect(self._browse_map)
+        self._map_drop_field.mapDropped.connect(self._set_map_path_on_ui)
         select_music_button.clicked.connect(self._select_battle_music)
         remove_music_button.clicked.connect(self._remove_battle_music)
+        browse_token_button.clicked.connect(self._browse_token_assets)
         button_box.accepted.connect(self.accept); button_box.rejected.connect(self.reject)
         self._show_grid_checkbox.stateChanged.connect(self._update_grid_settings_from_ui)
         self._grid_size_spinbox.valueChanged.connect(self._update_grid_settings_from_ui)
         self._grid_offset_x_spinbox.valueChanged.connect(self._update_grid_settings_from_ui)
         self._grid_offset_y_spinbox.valueChanged.connect(self._update_grid_settings_from_ui)
+        self._add_fog_checkbox.stateChanged.connect(self._update_fog_tool_from_ui)
+        self._fog_mode_combo.currentIndexChanged.connect(self._update_fog_tool_from_ui)
+        self._fog_color_button.clicked.connect(self._choose_fog_color)
         self._battle_music_volume_spinbox.valueChanged.connect(self._update_battle_music_volume_from_ui)
         self._battle_music_loop_checkbox.stateChanged.connect(self._update_battle_music_loop_from_ui)
         self._preview_label.tokenPlaced.connect(self._handle_token_placed_on_preview)
@@ -749,12 +1159,17 @@ class EncounterSetupDialog(QDialog):
         self._preview_zoom_in_button.clicked.connect(self._preview_label.zoomIn)
         self._preview_zoom_fit_button.clicked.connect(self._preview_label.resetZoom)
         self._token_asset_list.customContextMenuRequested.connect(self._show_token_list_context_menu)
+        self._map_asset_list.itemDoubleClicked.connect(self._set_map_from_asset_item)
+        self._music_asset_list.itemDoubleClicked.connect(self._set_music_from_asset_item)
 
+        self.populate_map_asset_list()
+        self.populate_music_asset_list()
         self.populate_token_list(self._available_token_paths)
         self._refresh_placed_token_size_cache()
         self._set_initial_settings_on_ui(settings) 
         self._update_preview_zoom_label(self._preview_label.getZoomLevel())
         self.adjustSize()
+        install_dialog_geometry_persistence(self, "encounter_setup")
 
     # ... (All other methods of EncounterSetupDialog: populate_token_list, _handle_token_placed_on_preview,
     #      _handle_token_removed_from_preview, _browse_map, _set_map_path_on_ui, _select_battle_music,
@@ -833,6 +1248,76 @@ class EncounterSetupDialog(QDialog):
                     item.setSizeHint(self._token_asset_list.iconSize() + QSize(20,20)) 
                     self._token_asset_list.addItem(item)
 
+    def populate_map_asset_list(self):
+        self._map_asset_list.clear()
+        if not self.asset_bin or not hasattr(self.asset_bin, 'get_image_asset_paths'):
+            return
+
+        for path in self.asset_bin.get_image_asset_paths():
+            if not path or not os.path.exists(path):
+                continue
+            if os.path.splitext(path)[1].lower() not in MAP_IMAGE_EXTENSIONS:
+                continue
+            icon = QIcon(path)
+            if icon.isNull():
+                continue
+            item = QListWidgetItem(icon, os.path.basename(path))
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setToolTip(path)
+            item.setSizeHint(self._map_asset_list.iconSize() + QSize(20, 24))
+            self._map_asset_list.addItem(item)
+
+    @pyqtSlot(QListWidgetItem)
+    def _set_map_from_asset_item(self, item: QListWidgetItem):
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path and isinstance(path, str):
+            self._set_map_path_on_ui(path)
+
+    def populate_music_asset_list(self):
+        self._music_asset_list.clear()
+        if not self.asset_bin or not hasattr(self.asset_bin, 'get_audio_asset_paths'):
+            return
+        for path in self.asset_bin.get_audio_asset_paths():
+            if not path or not os.path.exists(path):
+                continue
+            if os.path.splitext(path)[1].lower() not in AUDIO_EXTENSIONS:
+                continue
+            item = QListWidgetItem(os.path.basename(path))
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setToolTip(path)
+            self._music_asset_list.addItem(item)
+            if self._battle_music_path and os.path.normpath(path) == os.path.normpath(self._battle_music_path):
+                self._music_asset_list.setCurrentItem(item)
+
+    @pyqtSlot(QListWidgetItem)
+    def _set_music_from_asset_item(self, item: QListWidgetItem):
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path and isinstance(path, str):
+            self._battle_music_path = path
+            self._update_battle_music_label_ui()
+
+    @pyqtSlot()
+    def _browse_token_assets(self):
+        filters = "Tokens (" + " ".join([f"*{ext}" for ext in TOKEN_EXTENSIONS]) + ");;Images (*.png *.gif *.webp);;All Files (*)"
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "Add Token Assets", "", filters)
+        if not file_paths:
+            return
+        added_any = False
+        for token_path in file_paths:
+            if not token_path or not os.path.exists(token_path):
+                continue
+            added = False
+            if self.asset_bin and hasattr(self.asset_bin, "add_token_asset"):
+                added = bool(self.asset_bin.add_token_asset(token_path))
+            if added or token_path not in self._available_token_paths:
+                if token_path not in self._available_token_paths:
+                    self._available_token_paths.append(token_path)
+                added_any = True
+        if added_any:
+            if self.asset_bin and hasattr(self.asset_bin, "get_token_asset_paths"):
+                self._available_token_paths = list(self.asset_bin.get_token_asset_paths())
+            self.populate_token_list(self._available_token_paths)
+
     @pyqtSlot(str, int, int)
     def _handle_token_placed_on_preview(self, token_path: str, grid_x: int, grid_y: int):
         display_info = self._get_profile_token_display(token_path)
@@ -898,10 +1383,11 @@ class EncounterSetupDialog(QDialog):
             if selected_items: self._battle_music_path = audio_paths[list_widget.row(selected_items[0])]
             else: self._battle_music_path = None 
             self._update_battle_music_label_ui()
+            self.populate_music_asset_list()
 
     @pyqtSlot()
     def _remove_battle_music(self):
-        self._battle_music_path = None; self._update_battle_music_label_ui()
+        self._battle_music_path = None; self._update_battle_music_label_ui(); self.populate_music_asset_list()
 
     def _update_battle_music_label_ui(self):
         if self._battle_music_path and os.path.exists(self._battle_music_path):
@@ -925,6 +1411,33 @@ class EncounterSetupDialog(QDialog):
         self._grid_offset_x = self._grid_offset_x_spinbox.value(); self._grid_offset_y = self._grid_offset_y_spinbox.value()
         self._preview_label.setGridSettings(self._show_grid, self._grid_size, self._grid_offset_x, self._grid_offset_y)
 
+    def _refresh_fog_color_button(self):
+        color = QColor(self._fog_color)
+        if not color.isValid():
+            color = QColor(DEFAULT_FOG_COLOR)
+            self._fog_color = color.name()
+        self._fog_color_button.setText(color.name().upper())
+        self._fog_color_button.setStyleSheet(
+            f"QPushButton {{ background-color: {color.name()}; color: #111111; border: 1px solid #707070; }}"
+        )
+
+    def _update_fog_tool_from_ui(self):
+        mode = self._fog_mode_combo.currentData()
+        self._fog_mode = BattleMapWidget.normalize_fog_mode(mode) if BattleMapWidget is not None else str(mode or DEFAULT_FOG_MODE)
+        self._preview_label.setFogToolSettings(self._add_fog_checkbox.isChecked(), self._fog_mode, self._fog_color)
+
+    @pyqtSlot()
+    def _choose_fog_color(self):
+        initial_color = QColor(self._fog_color)
+        if not initial_color.isValid():
+            initial_color = QColor(DEFAULT_FOG_COLOR)
+        chosen = QColorDialog.getColor(initial_color, self, "Choose Fog Color")
+        if not chosen.isValid():
+            return
+        self._fog_color = chosen.name()
+        self._refresh_fog_color_button()
+        self._update_fog_tool_from_ui()
+
     def _set_initial_settings_on_ui(self, settings: Dict):
         self._set_map_path_on_ui(str(settings.get("map_path", DEFAULT_MAP_PATH or "")))
         self._battle_music_path = settings.get("battle_music_path"); self._update_battle_music_label_ui()
@@ -938,7 +1451,15 @@ class EncounterSetupDialog(QDialog):
         self._grid_size_spinbox.blockSignals(True); self._grid_size_spinbox.setValue(int(settings.get("grid_size", 50))); self._grid_size_spinbox.blockSignals(False)
         self._grid_offset_x_spinbox.blockSignals(True); self._grid_offset_x_spinbox.setValue(int(settings.get("grid_offset_x", 0))); self._grid_offset_x_spinbox.blockSignals(False)
         self._grid_offset_y_spinbox.blockSignals(True); self._grid_offset_y_spinbox.setValue(int(settings.get("grid_offset_y", 0))); self._grid_offset_y_spinbox.blockSignals(False)
+        self._add_fog_checkbox.blockSignals(True); self._add_fog_checkbox.setChecked(False); self._add_fog_checkbox.blockSignals(False)
+        self._fog_mode_combo.blockSignals(True)
+        self._fog_mode_combo.setCurrentIndex(max(0, self._fog_mode_combo.findData(DEFAULT_FOG_MODE)))
+        self._fog_mode_combo.blockSignals(False)
+        self._fog_color = DEFAULT_FOG_COLOR
+        self._refresh_fog_color_button()
         self._update_grid_settings_from_ui() 
+        self._preview_label.updateFogSquares(self._fog_squares)
+        self._update_fog_tool_from_ui()
         self._update_battle_music_volume_from_ui()
         self._update_battle_music_loop_from_ui()
         self._refresh_placed_token_size_cache()
@@ -948,7 +1469,8 @@ class EncounterSetupDialog(QDialog):
         self._update_grid_settings_from_ui() 
         self._update_battle_music_volume_from_ui()
         self._update_battle_music_loop_from_ui()
-        return {"map_path": self._map_path, "battle_music_path": self._battle_music_path, "battle_music_volume": self._battle_music_volume, "battle_music_loop": self._battle_music_loop, "show_grid": self._show_grid, "grid_size": self._grid_size, "grid_offset_x": self._grid_offset_x, "grid_offset_y": self._grid_offset_y, "tokens": list(self._placed_tokens)}
+        self._fog_squares = self._preview_label.getFogSquares()
+        return {"map_path": self._map_path, "battle_music_path": self._battle_music_path, "battle_music_volume": self._battle_music_volume, "battle_music_loop": self._battle_music_loop, "show_grid": self._show_grid, "grid_size": self._grid_size, "grid_offset_x": self._grid_offset_x, "grid_offset_y": self._grid_offset_y, "tokens": list(self._placed_tokens), "fog_squares": list(self._fog_squares)}
 
     @pyqtSlot(QPoint)
     def _show_token_list_context_menu(self, pos: QPoint):

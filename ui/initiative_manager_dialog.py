@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .dialog_theme import apply_readable_dialog_theme
+from .window_geometry import restore_window_geometry, save_window_geometry
 
 
 TEAM_PALETTE = [
@@ -101,6 +102,7 @@ class InitiativeManagerDialog(QDialog):
         self.setModal(False)
         self.setWindowFlag(Qt.WindowType.Tool, True)
         self.resize(860, 640)
+        restore_window_geometry(self, "initiative_manager")
         apply_readable_dialog_theme(self)
 
         self._focus_hint = QLabel("Enter initiative rolls in the highlighted right column. Blank means not set.")
@@ -297,6 +299,7 @@ class InitiativeManagerDialog(QDialog):
             if not applied:
                 event.ignore()
                 return
+        save_window_geometry(self, "initiative_manager")
         super().closeEvent(event)
 
     def _handle_cell_changed(self, _row: int, _column: int) -> None:

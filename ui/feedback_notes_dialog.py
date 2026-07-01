@@ -25,6 +25,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .window_geometry import install_dialog_geometry_persistence
+
 
 class FeedbackNotesDialog(QDialog):
     def __init__(self, parent=None):
@@ -32,6 +34,7 @@ class FeedbackNotesDialog(QDialog):
         self.setWindowTitle("Feedback Notes")
         self.setMinimumSize(760, 620)
         self.resize(920, 760)
+        install_dialog_geometry_persistence(self, "feedback_notes")
 
         self._build_ui()
         self._connect_signals()
@@ -212,4 +215,3 @@ class FeedbackNotesDialog(QDialog):
                 "Save Error",
                 f"Could not save feedback report.\nError: {exc}",
             )
-

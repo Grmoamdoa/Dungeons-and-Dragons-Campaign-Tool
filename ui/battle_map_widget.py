@@ -12,6 +12,7 @@
 
 import os
 import re
+import sys
 import traceback
 import datetime
 import math
@@ -210,6 +211,30 @@ MIN_ZOOM = 0.1
 MAX_ZOOM = 5.0
 TOKEN_MOVE_DRAG_START_DISTANCE_PX = 6
 MAX_TOKEN_SIZE_SQUARES = MAX_TOKEN_FOOTPRINT_DIMENSION
+FOG_MODE_HIDE_TOKEN = "hide_token"
+FOG_MODE_ALL = "all"
+FOG_MODES = {FOG_MODE_HIDE_TOKEN, FOG_MODE_ALL}
+FOG_MODE_LABELS = {
+    FOG_MODE_HIDE_TOKEN: "Hide Token",
+    FOG_MODE_ALL: "All",
+}
+DEFAULT_FOG_MODE = FOG_MODE_HIDE_TOKEN
+DEFAULT_FOG_COLOR = "#8f9297"
+
+
+def _resolve_resource_path(*parts: str) -> str:
+    candidates = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", *parts)),
+        os.path.abspath(os.path.join(getattr(sys, "_MEIPASS", ""), *parts)),
+        os.path.abspath(os.path.join(os.path.dirname(sys.executable), *parts)),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return candidates[0]
+
+
+ALL_FOG_TEXTURE_PATH = _resolve_resource_path("resources", "all_fog_texture.png")
 
 # --- NEW: Constants for Condition Text Drawing (Phase 3) ---
 CONDITION_TEXT_SCREEN_POINT_SIZE_RATIO = 0.65  # Relative to INITIATIVE_ORDER_FONT_SIZE
@@ -298,12 +323,21 @@ class BattleMapWidget(QWidget):
         self._token_pixmap_cache = {} # Cache source token pixmaps
         self._token_overlay_pixmap_cache = {} # Cache source-sized status overlays by (path, rgba)
         self._scaled_token_pixmap_cache = {} # Cache scaled token pixmaps by (path, target_width)
+        self._all_fog_texture: Optional[QPixmap] = None
         self._current_map_path = ""
         self._zoom_level = 1.0
         self.view_offset = QPointF(0.0, 0.0) # Map coordinate at widget top-left
         self.log_font = QFont("Monospace", 9)
 
         self.tokens_on_map = [] # List of dicts for token instances
+        self.fog_squares: dict[tuple[int, int], dict[str, Any]] = {}
+        self._fog_add_enabled = False
+        self._fog_mode = DEFAULT_FOG_MODE
+        self._fog_color = DEFAULT_FOG_COLOR
+        self._fog_drag_start_grid: Optional[Tuple[int, int]] = None
+        self._fog_drag_current_grid: Optional[Tuple[int, int]] = None
+        self._fog_drag_mode: Optional[str] = None
+        self._fog_runtime_touched = False
         self._selected_token_index: Optional[int] = None
         self.show_grid = True
         self.grid_size_px = DEFAULT_GRID_SIZE # Grid size in map pixels
@@ -520,6 +554,122 @@ class BattleMapWidget(QWidget):
         for dx in range(width):
             for dy in range(height):
                 yield (gx + dx, gy + dy)
+
+    def _iter_grid_rect_cells(self, start_grid: Tuple[int, int], end_grid: Tuple[int, int]):
+        min_x, max_x = sorted((int(start_grid[0]), int(end_grid[0])))
+        min_y, max_y = sorted((int(start_grid[1]), int(end_grid[1])))
+        for gx in range(min_x, max_x + 1):
+            for gy in range(min_y, max_y + 1):
+                yield gx, gy
+
+    @staticmethod
+    def normalize_fog_mode(mode: Any) -> str:
+        normalized = str(mode or DEFAULT_FOG_MODE).strip().lower()
+        return normalized if normalized in FOG_MODES else DEFAULT_FOG_MODE
+
+    @staticmethod
+    def normalize_fog_color(color: Any) -> str:
+        qcolor = QColor(str(color or DEFAULT_FOG_COLOR))
+        if not qcolor.isValid():
+            qcolor = QColor(DEFAULT_FOG_COLOR)
+        return qcolor.name()
+
+    @classmethod
+    def normalize_fog_squares(cls, raw_fog: Any) -> dict[tuple[int, int], dict[str, Any]]:
+        normalized: dict[tuple[int, int], dict[str, Any]] = {}
+        if not isinstance(raw_fog, list):
+            return normalized
+        for entry in raw_fog:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                grid_x = int(entry.get("grid_x"))
+                grid_y = int(entry.get("grid_y"))
+            except (TypeError, ValueError):
+                continue
+            normalized[(grid_x, grid_y)] = {
+                "grid_x": grid_x,
+                "grid_y": grid_y,
+                "mode": cls.normalize_fog_mode(entry.get("mode")),
+                "color": cls.normalize_fog_color(entry.get("color")),
+            }
+        return normalized
+
+    @staticmethod
+    def serialize_fog_squares(fog_squares: dict[tuple[int, int], dict[str, Any]]) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        if not isinstance(fog_squares, dict):
+            return serialized
+        for key, entry in sorted(fog_squares.items(), key=lambda item: (item[0][1], item[0][0])):
+            if not isinstance(key, tuple) or len(key) != 2 or not isinstance(entry, dict):
+                continue
+            try:
+                grid_x = int(entry.get("grid_x", key[0]))
+                grid_y = int(entry.get("grid_y", key[1]))
+            except (TypeError, ValueError):
+                continue
+            serialized.append({
+                "grid_x": grid_x,
+                "grid_y": grid_y,
+                "mode": BattleMapWidget.normalize_fog_mode(entry.get("mode")),
+                "color": BattleMapWidget.normalize_fog_color(entry.get("color")),
+            })
+        return serialized
+
+    def set_fog_tool_settings(self, enabled: bool, mode: Any = None, color: Any = None) -> None:
+        self._fog_add_enabled = bool(enabled)
+        if mode is not None:
+            self._fog_mode = self.normalize_fog_mode(mode)
+        if color is not None:
+            self._fog_color = self.normalize_fog_color(color)
+        self._fog_drag_start_grid = None
+        self._fog_drag_current_grid = None
+        self._fog_drag_mode = None
+        if self._fog_add_enabled and not self._is_in_any_selection_mode() and not self._generated_token_placement_request:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        elif not self._fog_add_enabled:
+            self.unsetCursor()
+        self.update()
+
+    def _paint_fog_rect(self, start_grid: Tuple[int, int], end_grid: Tuple[int, int]) -> bool:
+        changed = False
+        for gx, gy in self._iter_grid_rect_cells(start_grid, end_grid):
+            entry = {
+                "grid_x": gx,
+                "grid_y": gy,
+                "mode": self._fog_mode,
+                "color": self._fog_color,
+            }
+            if self.fog_squares.get((gx, gy)) != entry:
+                self.fog_squares[(gx, gy)] = entry
+                changed = True
+        return changed
+
+    def _remove_fog_at_grid(self, grid_pos: Tuple[int, int]) -> bool:
+        return self.fog_squares.pop((int(grid_pos[0]), int(grid_pos[1])), None) is not None
+
+    def _remove_fog_rect(self, start_grid: Tuple[int, int], end_grid: Tuple[int, int]) -> bool:
+        changed = False
+        for cell in self._iter_grid_rect_cells(start_grid, end_grid):
+            if self.fog_squares.pop(cell, None) is not None:
+                changed = True
+        return changed
+
+    def _emit_fog_changed(self) -> None:
+        self._fog_runtime_touched = True
+        self.tokenDataModified.emit()
+        self.update()
+
+    def _token_overlaps_player_hidden_fog(self, token_data: dict[str, Any]) -> bool:
+        try:
+            grid_pos = (int(token_data.get("grid_x")), int(token_data.get("grid_y")))
+        except (TypeError, ValueError):
+            return False
+        footprint_w, footprint_h = self._get_token_footprint(token_data)
+        for cell in self._iter_footprint_cells(grid_pos, footprint_w, footprint_h):
+            if cell in self.fog_squares:
+                return True
+        return False
 
     def _get_token_footprint(self, token_data: dict[str, Any]) -> tuple[int, int]:
         return self._normalize_token_footprint(
@@ -1555,6 +1705,9 @@ class BattleMapWidget(QWidget):
                 elif rect_on_map:
                      painter.setPen(QPen(TOKEN_LOAD_ERROR_COLOR, 2)); painter.setBrush(TOKEN_LOAD_ERROR_COLOR); painter.drawEllipse(rect_on_map)
 
+        self._draw_dm_fog_markers(painter)
+        self._draw_fog_drag_preview(painter)
+
         if (
             self.is_selecting_move_target
             and self.hovered_grid_square
@@ -1632,6 +1785,124 @@ class BattleMapWidget(QWidget):
             line_map_y = gy * self.grid_size_px + self.grid_offset_y
             line = QLineF(visible_map_rect.left(), line_map_y, visible_map_rect.right(), line_map_y)
             painter.drawLine(line)
+
+    def _draw_fog_texture_in_rect(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        color: QColor,
+        opacity: int,
+        use_image_texture: bool = False,
+    ) -> None:
+        if use_image_texture:
+            texture = self._load_all_fog_texture()
+            if texture is not None and not texture.isNull():
+                painter.drawPixmap(rect, texture, QRectF(texture.rect()))
+                tint = QColor(color)
+                painter.save()
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply)
+                tint.setAlpha(165)
+                painter.fillRect(rect, tint)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                tint.setAlpha(58)
+                painter.fillRect(rect, tint)
+                painter.restore()
+                return
+
+        fog_color = QColor(color)
+        fog_color.setAlpha(max(0, min(255, opacity)))
+        painter.fillRect(rect, fog_color)
+
+        haze_pen = QPen(QColor(255, 255, 255, max(22, min(80, opacity // 3))), max(1.0, rect.width() * 0.025))
+        painter.setPen(haze_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for i in range(3):
+            inset = rect.width() * (0.12 + i * 0.08)
+            haze_rect = rect.adjusted(inset, rect.height() * (0.16 + i * 0.07), -inset * 0.55, -rect.height() * (0.18 + i * 0.04))
+            painter.drawArc(haze_rect, 20 * 16, 150 * 16)
+
+        shadow_pen = QPen(QColor(25, 25, 25, max(16, min(65, opacity // 4))), max(1.0, rect.width() * 0.018))
+        painter.setPen(shadow_pen)
+        for i in range(2):
+            y = rect.top() + rect.height() * (0.38 + i * 0.26)
+            painter.drawLine(QLineF(rect.left() + rect.width() * 0.12, y, rect.right() - rect.width() * 0.12, y + rect.height() * 0.08))
+
+    def _load_all_fog_texture(self) -> Optional[QPixmap]:
+        if self._all_fog_texture is not None:
+            return self._all_fog_texture
+        texture = QPixmap(ALL_FOG_TEXTURE_PATH)
+        self._all_fog_texture = texture if not texture.isNull() else None
+        return self._all_fog_texture
+
+    def _draw_fog_squares_for_mode(
+        self,
+        painter: QPainter,
+        mode: str,
+        opacity: int,
+        only_cells: Optional[set[tuple[int, int]]] = None,
+    ) -> None:
+        if self.grid_size_px <= 0:
+            return
+        for cell, fog_entry in self.fog_squares.items():
+            if only_cells is not None and cell not in only_cells:
+                continue
+            if self.normalize_fog_mode(fog_entry.get("mode")) != mode:
+                continue
+            rect = self._grid_to_map_rect(cell)
+            color = QColor(self.normalize_fog_color(fog_entry.get("color")))
+            self._draw_fog_texture_in_rect(
+                painter,
+                rect,
+                color,
+                opacity,
+                use_image_texture=(mode == FOG_MODE_ALL),
+            )
+
+    def _draw_dm_fog_markers(self, painter: QPainter) -> None:
+        if self.grid_size_px <= 0 or not self.fog_squares:
+            return
+        marker_size = max(18.0 / max(self._zoom_level, 0.01), self.grid_size_px * 0.38)
+        outline_width = max(1.0 / max(self._zoom_level, 0.01), self.grid_size_px * 0.025)
+        for cell, fog_entry in self.fog_squares.items():
+            rect = self._grid_to_map_rect(cell)
+            mode = self.normalize_fog_mode(fog_entry.get("mode"))
+            color = QColor(self.normalize_fog_color(fog_entry.get("color")))
+            color.setAlpha(245)
+            marker = QPolygonF([
+                rect.topLeft(),
+                QPointF(rect.left() + marker_size, rect.top()),
+                QPointF(rect.left(), rect.top() + marker_size),
+            ])
+            painter.setPen(QPen(QColor(20, 20, 20, 230), outline_width))
+            painter.setBrush(color)
+            painter.drawPolygon(marker)
+            label_rect = QRectF(rect.left(), rect.top(), marker_size * 0.72, marker_size * 0.72)
+            font = painter.font()
+            original_size = font.pointSizeF()
+            font.setPointSizeF(max(6.0 / max(self._zoom_level, 0.01), marker_size * 0.32))
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(QColor(255, 255, 255, 240))
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, "A" if mode == FOG_MODE_ALL else "T")
+            font.setBold(False)
+            font.setPointSizeF(original_size)
+            painter.setFont(font)
+
+    def _draw_fog_drag_preview(self, painter: QPainter) -> None:
+        if not self._fog_add_enabled or self._fog_drag_start_grid is None or self._fog_drag_current_grid is None:
+            return
+        preview_cells = set(self._iter_grid_rect_cells(self._fog_drag_start_grid, self._fog_drag_current_grid))
+        if self._fog_drag_mode == "remove":
+            preview_color = QColor(255, 70, 70, 70)
+            pen_color = QColor(255, 70, 70, 210)
+        else:
+            preview_color = QColor(self._fog_color)
+            preview_color.setAlpha(85)
+            pen_color = QColor(255, 255, 255, 170)
+        painter.setPen(QPen(pen_color, max(0.5, 1.5 / max(self._zoom_level, 0.01))))
+        painter.setBrush(preview_color)
+        for cell in preview_cells:
+            painter.drawRect(self._grid_to_map_rect(cell))
 
     def _draw_movement_squares(
         self,
@@ -1778,6 +2049,11 @@ class BattleMapWidget(QWidget):
         self.initiative_order.clear()
         self._current_round = 1
         self._team_count = 0
+        self.fog_squares.clear()
+        self._fog_drag_start_grid = None
+        self._fog_drag_current_grid = None
+        self._fog_drag_mode = None
+        self._fog_runtime_touched = False
         self.log_messages.clear() 
         self._refresh_log_text_from_history(scroll_to_end=False)
         self.highlighted_movement_squares.clear()
@@ -1808,6 +2084,7 @@ class BattleMapWidget(QWidget):
         self.grid_size_px = data.get("grid_size", DEFAULT_GRID_SIZE)
         self.grid_offset_x = data.get("grid_offset_x", 0)
         self.grid_offset_y = data.get("grid_offset_y", 0)
+        self.fog_squares = self.normalize_fog_squares(data.get("fog_squares", []))
         self._load_map_image(map_path)
         initial_tokens_data = data.get("tokens", [])
         print(f"Applying {len(initial_tokens_data)} initial tokens...")
@@ -2018,6 +2295,9 @@ class BattleMapWidget(QWidget):
             if self._selected_token_index is not None and 0 <= self._selected_token_index < len(self.tokens_on_map)
             else None,
             "tokens": runtime_tokens,
+            "fog_squares": self.serialize_fog_squares(self.fog_squares),
+            "_fog_runtime_schema": 1,
+            "_fog_runtime_touched": bool(self._fog_runtime_touched),
             "log_messages": list(self.log_messages),
         }
 
@@ -2142,6 +2422,13 @@ class BattleMapWidget(QWidget):
                 if (dest_rect.top() - 1.0) <= screen_y <= (dest_rect.bottom() + 1.0):
                     painter.drawLine(QLineF(dest_rect.left(), screen_y, dest_rect.right(), screen_y))
 
+        painter.save()
+        painter.translate(dest_rect.left(), dest_rect.top())
+        painter.scale(scale_x, scale_y)
+        painter.translate(-visible_left, -visible_top)
+        self._draw_fog_squares_for_mode(painter, FOG_MODE_HIDE_TOKEN, 118)
+        painter.restore()
+
         if self.is_selecting_move_target:
             painter.save()
             painter.translate(dest_rect.left(), dest_rect.top())
@@ -2169,6 +2456,8 @@ class BattleMapWidget(QWidget):
             painter.restore()
 
         for token in self.tokens_on_map:
+            if self._token_overlaps_player_hidden_fog(token):
+                continue
             token_rect = token.get("rect_on_map")
             if not isinstance(token_rect, QRectF) or token_rect.isNull():
                 continue
@@ -2193,6 +2482,13 @@ class BattleMapWidget(QWidget):
                     px_to_map_override=effective_px_to_map,
                 )
                 painter.restore()
+
+        painter.save()
+        painter.translate(dest_rect.left(), dest_rect.top())
+        painter.scale(scale_x, scale_y)
+        painter.translate(-visible_left, -visible_top)
+        self._draw_fog_squares_for_mode(painter, FOG_MODE_ALL, 255)
+        painter.restore()
 
         painter.restore()
         painter.end()
@@ -2304,6 +2600,12 @@ class BattleMapWidget(QWidget):
         self.grid_size_px = to_int(runtime_state.get("grid_size"), self.grid_size_px)
         self.grid_offset_x = to_int(runtime_state.get("grid_offset_x"), self.grid_offset_x)
         self.grid_offset_y = to_int(runtime_state.get("grid_offset_y"), self.grid_offset_y)
+        if "fog_squares" in runtime_state:
+            raw_runtime_fog = runtime_state.get("fog_squares", [])
+            runtime_fog_touched = bool(runtime_state.get("_fog_runtime_touched", False))
+            if raw_runtime_fog or runtime_fog_touched or not self.fog_squares:
+                self.fog_squares = self.normalize_fog_squares(raw_runtime_fog)
+            self._fog_runtime_touched = runtime_fog_touched
         self._team_count = max(0, min(8, to_int(runtime_state.get("team_count"), 0)))
         if "full_manual_mode" in runtime_state:
             self.set_full_manual_mode(bool(runtime_state.get("full_manual_mode", False)), emit_log=False)
@@ -3522,6 +3824,28 @@ class BattleMapWidget(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             self._clear_pending_token_move_drag()
 
+        if self._fog_add_enabled and not self.is_animating_move:
+            grid_coords = self._map_to_grid_pos(map_pos)
+            if grid_coords is None:
+                event.accept()
+                return
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._fog_drag_start_grid = grid_coords
+                self._fog_drag_current_grid = grid_coords
+                self._fog_drag_mode = "paint"
+                self.setCursor(Qt.CursorShape.CrossCursor)
+                self.update()
+                event.accept()
+                return
+            if event.button() == Qt.MouseButton.RightButton:
+                self._fog_drag_start_grid = grid_coords
+                self._fog_drag_current_grid = grid_coords
+                self._fog_drag_mode = "remove"
+                self.setCursor(Qt.CursorShape.CrossCursor)
+                self.update()
+                event.accept()
+                return
+
         if self._generated_token_placement_request and not self.is_animating_move:
             if event.button() == Qt.MouseButton.RightButton:
                 self._generated_token_placement_request = None
@@ -3702,6 +4026,19 @@ class BattleMapWidget(QWidget):
     def mouseMoveEvent(self, event: QMouseEvent):
             widget_pos = event.position()
             if (
+                self._fog_add_enabled
+                and self._fog_drag_start_grid is not None
+                and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton))
+                and not self.is_animating_move
+            ):
+                map_pos = self._widget_to_map_pos(widget_pos)
+                grid_coords = self._map_to_grid_pos(map_pos)
+                if grid_coords is not None and grid_coords != self._fog_drag_current_grid:
+                    self._fog_drag_current_grid = grid_coords
+                    self.update()
+                event.accept()
+                return
+            if (
                 self._pending_token_move_drag_index is not None
                 and self._pending_token_move_drag_start_widget_pos is not None
                 and (event.buttons() & Qt.MouseButton.LeftButton)
@@ -3747,7 +4084,10 @@ class BattleMapWidget(QWidget):
                 event.accept()
                 return
             else:
-                if not self.panning and not self._is_in_any_selection_mode() and not self._generated_token_placement_request:
+                if self._fog_add_enabled:
+                     if self.cursor().shape() != Qt.CursorShape.CrossCursor:
+                          self.setCursor(Qt.CursorShape.CrossCursor)
+                elif not self.panning and not self._is_in_any_selection_mode() and not self._generated_token_placement_request:
                      current_cursor_shape = self.cursor().shape()
                      map_pos = self._widget_to_map_pos(widget_pos)
                      hovered_token_index = self._get_token_at_map_pos(map_pos)
@@ -3760,6 +4100,28 @@ class BattleMapWidget(QWidget):
                 super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if (
+            event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton)
+            and self._fog_add_enabled
+            and self._fog_drag_start_grid is not None
+            and not self.is_animating_move
+        ):
+            widget_pos = event.position()
+            map_pos = self._widget_to_map_pos(widget_pos)
+            end_grid = self._map_to_grid_pos(map_pos) or self._fog_drag_current_grid or self._fog_drag_start_grid
+            if self._fog_drag_mode == "remove":
+                changed = self._remove_fog_rect(self._fog_drag_start_grid, end_grid)
+            else:
+                changed = self._paint_fog_rect(self._fog_drag_start_grid, end_grid)
+            self._fog_drag_start_grid = None
+            self._fog_drag_current_grid = None
+            self._fog_drag_mode = None
+            if changed:
+                self._emit_fog_changed()
+            else:
+                self.update()
+            event.accept()
+            return
         if (
             event.button() == Qt.MouseButton.LeftButton
             and self._drag_move_selection_active
@@ -3792,6 +4154,9 @@ class BattleMapWidget(QWidget):
     def contextMenuEvent(self, event: QContextMenuEvent):
         if self.is_animating_move:
             event.ignore()
+            return
+        if self._fog_add_enabled:
+            event.accept()
             return
         if self._generated_token_placement_request:
             event.ignore()

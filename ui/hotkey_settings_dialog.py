@@ -18,6 +18,8 @@ from PyQt6.QtWidgets import (
     QKeySequenceEdit,
 )
 
+from .window_geometry import install_dialog_geometry_persistence
+
 
 class HotkeySettingsDialog(QDialog):
     def __init__(
@@ -29,6 +31,7 @@ class HotkeySettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Hotkey Settings")
         self.resize(720, 520)
+        install_dialog_geometry_persistence(self, "hotkey_settings")
         self._entries = list(entries)
         self._reserved_shortcuts = dict(reserved_shortcuts)
         self._pending_shortcuts: dict[str, str] = {

@@ -4,6 +4,7 @@ from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QTextBrowser, QVBoxLayout
 
 from .user_manual_content import USER_MANUAL_MARKDOWN
+from .window_geometry import install_dialog_geometry_persistence
 
 
 class UserManualDialog(QDialog):
@@ -12,6 +13,7 @@ class UserManualDialog(QDialog):
         self.setWindowTitle("User Manual")
         self.setMinimumSize(700, 520)
         self.resize(900, 700)
+        install_dialog_geometry_persistence(self, "user_manual")
 
         layout = QVBoxLayout(self)
 

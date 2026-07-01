@@ -4,7 +4,7 @@ import copy
 import time
 from typing import Any, Union
 
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal
+from PyQt6.QtCore import Qt, QRectF, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QPainter, QPen, QMouseEvent, QPalette
 from PyQt6.QtWidgets import (
     QDialog,
@@ -24,14 +24,21 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QCheckBox,
     QComboBox,
+    QColorDialog,
 )
 
 from .timeline_editor import TimelineEditorWidget
+from .window_geometry import restore_window_geometry, save_window_geometry
 
 
 TRACK_ROWS = {"Image": 0, "Audio": 1, "Battle": 2}
 TRACK_COLORS = {"Image": QColor("#7fa7ff"), "Audio": QColor("#8fdf9e"), "Battle": QColor("#ff9b9b")}
 TRACK_BG_COLORS = {"Image": QColor("#dbe8ff"), "Audio": QColor("#ddf9e0"), "Battle": QColor("#ffe0e0")}
+FOG_MODE_HIDE_TOKEN = "hide_token"
+FOG_MODE_ALL = "all"
+FOG_MODE_LABELS = {FOG_MODE_HIDE_TOKEN: "Hide Token", FOG_MODE_ALL: "All"}
+DEFAULT_FOG_MODE = FOG_MODE_HIDE_TOKEN
+DEFAULT_FOG_COLOR = "#8f9297"
 
 
 class MiniTimelinePreview(QWidget):
@@ -290,6 +297,7 @@ class DMControlPanelDialog(QDialog):
     battleTokenSelectionChanged = pyqtSignal(str)
     initiativeManagerRequested = pyqtSignal()
     movementCountModeChanged = pyqtSignal(str)
+    fogToolSettingsChanged = pyqtSignal(bool, str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -297,6 +305,7 @@ class DMControlPanelDialog(QDialog):
         self.setModal(False)
         self.setWindowFlag(Qt.WindowType.Tool, True)
         self.resize(840, 640)
+        restore_window_geometry(self, "dm_control_panel")
 
         self._runtime_state: dict[str, Any] = {"clip_overrides": {}, "skip_ranges": [], "meta": {}}
         self._clip_snapshots: list[dict[str, Any]] = []
@@ -309,6 +318,7 @@ class DMControlPanelDialog(QDialog):
         self._selected_battle_token_id: Union[str, None] = None
         self._is_refreshing_battle_tokens_ui = False
         self._is_refreshing_movement_mode_ui = False
+        self._fog_color = DEFAULT_FOG_COLOR
 
         main_layout = QVBoxLayout(self)
 
@@ -441,11 +451,28 @@ class DMControlPanelDialog(QDialog):
         skip_layout.addWidget(self.skip_range_list, 1)
 
         session_group = QGroupBox("Session Controls")
-        session_layout = QHBoxLayout(session_group)
+        session_layout = QVBoxLayout(session_group)
+        session_button_row = QHBoxLayout()
         self.play_pause_button = QPushButton("Play")
         self.end_encounter_button = QPushButton("End Encounter")
-        session_layout.addWidget(self.play_pause_button)
-        session_layout.addWidget(self.end_encounter_button)
+        session_button_row.addWidget(self.play_pause_button)
+        session_button_row.addWidget(self.end_encounter_button)
+        session_layout.addLayout(session_button_row)
+        grid_settings_group = QGroupBox("Grid Settings")
+        grid_settings_layout = QFormLayout(grid_settings_group)
+        self.add_fog_checkbox = QCheckBox()
+        grid_settings_layout.addRow("Add Fog:", self.add_fog_checkbox)
+        self.fog_mode_combo = QComboBox()
+        self.fog_mode_combo.addItem(FOG_MODE_LABELS[FOG_MODE_HIDE_TOKEN], FOG_MODE_HIDE_TOKEN)
+        self.fog_mode_combo.addItem(FOG_MODE_LABELS[FOG_MODE_ALL], FOG_MODE_ALL)
+        self.fog_mode_combo.setStyleSheet(
+            "QComboBox { background-color: #4b5563; color: #ffffff; border: 1px solid #aeb6bf; padding: 4px 8px; }"
+            "QComboBox QAbstractItemView { background-color: #374151; color: #ffffff; selection-background-color: #2563eb; }"
+        )
+        grid_settings_layout.addRow("Fog Type:", self.fog_mode_combo)
+        self.fog_color_button = QPushButton("Choose Color")
+        grid_settings_layout.addRow("Fog Color:", self.fog_color_button)
+        session_layout.addWidget(grid_settings_group)
         controls_layout.addWidget(session_group)
 
         token_group = QGroupBox("Encounter Token Controls")
@@ -499,14 +526,22 @@ class DMControlPanelDialog(QDialog):
         self.apply_to_campaign_button.clicked.connect(self.applyClipChangesRequested.emit)
         self.play_pause_button.clicked.connect(self.playPauseRequested.emit)
         self.end_encounter_button.clicked.connect(self.endEncounterRequested.emit)
+        self.add_fog_checkbox.stateChanged.connect(self._handle_fog_tool_settings_changed)
+        self.fog_mode_combo.currentIndexChanged.connect(self._handle_fog_tool_settings_changed)
+        self.fog_color_button.clicked.connect(self._choose_fog_color)
         self.battle_token_list.itemSelectionChanged.connect(self._handle_battle_token_selection_changed)
         self.movement_count_mode_combo.currentIndexChanged.connect(self._handle_movement_count_mode_changed)
         self.manage_initiative_button.clicked.connect(self.initiativeManagerRequested.emit)
         self.edit_token_profile_button.clicked.connect(self._handle_edit_token_profile_clicked)
         self.set_session_controls_state(False, False)
+        self._refresh_fog_color_button()
         self._refresh_battle_token_controls()
         self._set_mini_timeline_mode("move_clips")
         self._apply_readable_dark_theme()
+
+    def closeEvent(self, event) -> None:
+        save_window_geometry(self, "dm_control_panel")
+        super().closeEvent(event)
 
     def _apply_readable_dark_theme(self) -> None:
         palette = self.palette()
@@ -683,6 +718,11 @@ class DMControlPanelDialog(QDialog):
             self.play_pause_button.setText("Pause" if self._is_timeline_playing else "Play")
             self.play_pause_button.setEnabled(True)
         self.end_encounter_button.setEnabled(self._in_battle_mode)
+        self.add_fog_checkbox.setEnabled(self._in_battle_mode)
+        self.fog_mode_combo.setEnabled(self._in_battle_mode)
+        self.fog_color_button.setEnabled(self._in_battle_mode)
+        if not self._in_battle_mode and self.add_fog_checkbox.isChecked():
+            self.add_fog_checkbox.setChecked(False)
         self._refresh_battle_token_controls()
 
     def set_battle_token_state(
@@ -728,6 +768,39 @@ class DMControlPanelDialog(QDialog):
         self._is_refreshing_movement_mode_ui = True
         self.movement_count_mode_combo.setCurrentIndex(index)
         self._is_refreshing_movement_mode_ui = False
+
+    def _refresh_fog_color_button(self) -> None:
+        color = QColor(self._fog_color)
+        if not color.isValid():
+            color = QColor(DEFAULT_FOG_COLOR)
+            self._fog_color = color.name()
+        self.fog_color_button.setText(color.name().upper())
+        self.fog_color_button.setStyleSheet(
+            f"QPushButton {{ background-color: {color.name()}; color: #111827; border: 1px solid #aeb6bf; }}"
+        )
+
+    def _current_fog_mode(self) -> str:
+        mode = self.fog_mode_combo.currentData()
+        return mode if isinstance(mode, str) and mode in {FOG_MODE_HIDE_TOKEN, FOG_MODE_ALL} else DEFAULT_FOG_MODE
+
+    @pyqtSlot()
+    def _choose_fog_color(self) -> None:
+        initial_color = QColor(self._fog_color)
+        if not initial_color.isValid():
+            initial_color = QColor(DEFAULT_FOG_COLOR)
+        chosen = QColorDialog.getColor(initial_color, self, "Choose Fog Color")
+        if not chosen.isValid():
+            return
+        self._fog_color = chosen.name()
+        self._refresh_fog_color_button()
+        self._handle_fog_tool_settings_changed()
+
+    def _handle_fog_tool_settings_changed(self) -> None:
+        self.fogToolSettingsChanged.emit(
+            bool(self.add_fog_checkbox.isChecked() and self._in_battle_mode),
+            self._current_fog_mode(),
+            self._fog_color,
+        )
 
     def _normalize_runtime_state(self, runtime_state: dict[str, Any]) -> dict[str, Any]:
         normalized = {"clip_overrides": {}, "skip_ranges": [], "meta": {}}

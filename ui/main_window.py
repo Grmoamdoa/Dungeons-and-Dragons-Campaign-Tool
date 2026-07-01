@@ -43,6 +43,7 @@ from .user_manual_dialog import UserManualDialog
 from .feedback_notes_dialog import FeedbackNotesDialog
 from .initiative_manager_dialog import InitiativeManagerDialog
 from .generated_token_stats_dialog import GeneratedTokenStatsDialog
+from .window_geometry import restore_window_geometry, save_window_geometry
 from .token_profile_utils import ensure_profile_name
 from .token_footprint_utils import (
     DEFAULT_TOKEN_VISUAL_FIT_MODE,
@@ -158,6 +159,7 @@ class MainWindow(QMainWindow):
 
         self._set_initial_window_title()
         self.setGeometry(100, 100, 1200, 850) 
+        restore_window_geometry(self, "main_window")
 
         self._create_menu_bar()
         self._create_central_widget() 
@@ -780,6 +782,11 @@ class MainWindow(QMainWindow):
                 self._handle_dm_movement_count_mode_changed,
                 "_handle_dm_movement_count_mode_changed",
             )
+            self._connect_safe(
+                self.dm_control_panel.fogToolSettingsChanged,
+                self._handle_dm_fog_tool_settings_changed,
+                "_handle_dm_fog_tool_settings_changed",
+            )
             self.dm_control_panel.set_movement_count_mode(self._movement_count_mode)
         return self.dm_control_panel
 
@@ -1304,6 +1311,11 @@ class MainWindow(QMainWindow):
             self.battle_map_widget.set_movement_count_mode(normalized_mode)
         if self.dm_control_panel:
             self.dm_control_panel.set_movement_count_mode(normalized_mode)
+
+    @pyqtSlot(bool, str, str)
+    def _handle_dm_fog_tool_settings_changed(self, enabled: bool, mode: str, color: str):
+        if self.battle_map_widget:
+            self.battle_map_widget.set_fog_tool_settings(enabled, mode, color)
 
     def _resolve_dm_overrides_on_session_end(self) -> bool:
         if not self.timeline_editor or not self.timeline_editor.has_dm_runtime_overrides():
@@ -2648,6 +2660,9 @@ class MainWindow(QMainWindow):
             event.accept()
 
         if event.isAccepted():
+            save_window_geometry(self, "main_window")
+            if self.dm_control_panel:
+                save_window_geometry(self.dm_control_panel, "dm_control_panel")
             self._cleanup_loaded_project_temp_dir()
             print("Application closing. Quitting Pygame mixer.")
             if self._is_mixer_ready(): pygame.mixer.quit()

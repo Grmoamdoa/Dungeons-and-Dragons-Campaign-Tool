@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from .token_profile_utils import derive_profile_name_from_path, ensure_profile_name
+from .window_geometry import install_dialog_geometry_persistence
 
 # --- IMPORTANT: Ensure TokenProfileEditorDialog is importable ---
 # Adjust the path based on your actual project structure
@@ -51,6 +52,7 @@ class ProfileManagerDialog(QDialog):
         self.close_button = None # QPushButton
 
         self._setup_ui()          # Create widgets and layout
+        install_dialog_geometry_persistence(self, "profile_manager")
         self._populate_table()    # Fill the table with initial data
         self._connect_signals()   # Connect button clicks and table selection
 

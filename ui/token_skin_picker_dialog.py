@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QListWidget, QLis
 
 from .dialog_theme import apply_readable_dialog_theme
 from .token_profile_utils import derive_profile_name_from_path, ensure_profile_name
+from .window_geometry import install_dialog_geometry_persistence
 
 
 class TokenSkinPickerDialog(QDialog):
@@ -23,6 +24,7 @@ class TokenSkinPickerDialog(QDialog):
         self.setWindowTitle("Assign Token Skin")
         self.setModal(True)
         self.resize(520, 420)
+        install_dialog_geometry_persistence(self, "token_skin_picker")
         apply_readable_dialog_theme(self)
 
         self._asset_list = QListWidget(self)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QPlainTextEdit, QVBoxLayout
 
 from .dialog_theme import apply_readable_dialog_theme
+from .window_geometry import install_dialog_geometry_persistence
 
 
 class TokenNotesDialog(QDialog):
@@ -11,6 +12,7 @@ class TokenNotesDialog(QDialog):
         self.setWindowTitle("Token Notes")
         self.setModal(True)
         self.resize(460, 320)
+        install_dialog_geometry_persistence(self, "token_notes")
         apply_readable_dialog_theme(self)
 
         self._notes_edit = QPlainTextEdit(self)

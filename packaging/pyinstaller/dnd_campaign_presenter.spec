@@ -18,7 +18,7 @@ analysis = Analysis(
     [str(project_root / "main.py")],
     pathex=[str(project_root)],
     binaries=pygame_binaries,
-    datas=[],
+    datas=[(str(project_root / "resources"), "resources")],
     hiddenimports=["PyQt6.sip"],
     hookspath=[],
     hooksconfig={},
