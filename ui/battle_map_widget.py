@@ -679,9 +679,38 @@ class BattleMapWidget(QWidget):
             return False
         footprint_w, footprint_h = self._get_token_footprint(token_data)
         for cell in self._iter_footprint_cells(grid_pos, footprint_w, footprint_h):
-            if cell in self.fog_squares:
+            fog_entry = self.fog_squares.get(cell)
+            if isinstance(fog_entry, dict) and self.normalize_fog_mode(fog_entry.get("mode")) == FOG_MODE_HIDE_TOKEN:
                 return True
         return False
+
+    def _movement_preview_hidden_from_player(self) -> bool:
+        if self.move_origin_token_index is None:
+            return False
+        if not (0 <= self.move_origin_token_index < len(self.tokens_on_map)):
+            return False
+        return self._token_overlaps_player_hidden_fog(self.tokens_on_map[self.move_origin_token_index])
+
+    def _filter_player_visible_movement_squares(
+        self,
+        squares: Union[set, list],
+        footprint_w: int = 1,
+        footprint_h: int = 1,
+    ) -> list[tuple[int, int]]:
+        if not squares:
+            return []
+        width, height = self._normalize_token_footprint(footprint_w, footprint_h)
+        visible_squares: list[tuple[int, int]] = []
+        for gx, gy in squares:
+            covered_cells = self._iter_footprint_cells((gx, gy), width, height)
+            if any(
+                isinstance(self.fog_squares.get(cell), dict)
+                and self.normalize_fog_mode(self.fog_squares[cell].get("mode")) == FOG_MODE_HIDE_TOKEN
+                for cell in covered_cells
+            ):
+                continue
+            visible_squares.append((gx, gy))
+        return visible_squares
 
     def _get_token_footprint(self, token_data: dict[str, Any]) -> tuple[int, int]:
         return self._normalize_token_footprint(
@@ -2791,7 +2820,7 @@ class BattleMapWidget(QWidget):
         self._draw_fog_squares_for_mode(painter, FOG_MODE_HIDE_TOKEN, 118)
         painter.restore()
 
-        if self.is_selecting_move_target:
+        if self.is_selecting_move_target and not self._movement_preview_hidden_from_player():
             painter.save()
             painter.translate(dest_rect.left(), dest_rect.top())
             painter.scale(scale_x, scale_y)
@@ -2800,17 +2829,27 @@ class BattleMapWidget(QWidget):
             footprint_h = DEFAULT_TOKEN_FOOTPRINT_HEIGHT
             if self.move_origin_token_index is not None and 0 <= self.move_origin_token_index < len(self.tokens_on_map):
                 footprint_w, footprint_h = self._get_token_footprint(self.tokens_on_map[self.move_origin_token_index])
+            visible_movement_squares = self._filter_player_visible_movement_squares(
+                self.highlighted_movement_squares,
+                footprint_w,
+                footprint_h,
+            )
             self._draw_movement_squares(
                 painter,
-                self.highlighted_movement_squares,
+                visible_movement_squares,
                 MOVEMENT_RANGE_COLOR,
                 footprint_w=footprint_w,
                 footprint_h=footprint_h,
             )
             if self.current_highlighted_path:
+                visible_highlighted_path = self._filter_player_visible_movement_squares(
+                    self.current_highlighted_path,
+                    footprint_w,
+                    footprint_h,
+                )
                 self._draw_movement_squares(
                     painter,
-                    self.current_highlighted_path,
+                    visible_highlighted_path,
                     MOVEMENT_PATH_COLOR,
                     footprint_w=footprint_w,
                     footprint_h=footprint_h,

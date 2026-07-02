@@ -303,6 +303,7 @@ pip install -r requirements.txt
 5. Reload that `.dcp` and confirm clips still work.
 6. If the first timeline scene is an encounter, press Play after reload and confirm its tokens appear without reopening Encounter Setup.
 7. For a multi-stage encounter, confirm stage maps, tokens, and fog/cloud squares survive save/load and player-view rendering.
+8. In a presentation session, select movement for a token hidden by Hide Token fog and confirm the player view does not show the token cursor/path or green movement range.
 
 ## Known-Good Baseline
 
