@@ -95,6 +95,7 @@ class InitiativeManagerDialog(QDialog):
         self._team_assignments_by_token_id: dict[str, Optional[int]] = {}
         self._team_bucket_lists: dict[int, _TeamBucketListWidget] = {}
         self._team_bucket_headers: dict[int, QLabel] = {}
+        self._team_participation_buttons: dict[int, QPushButton] = {}
         self._team_bucket_order: list[int] = []
         self._team_token_meta_by_id: dict[str, dict[str, Any]] = {}
 
@@ -272,6 +273,7 @@ class InitiativeManagerDialog(QDialog):
                     "status": str(token.get("status", "alive")),
                     "hp": hp,
                     "max_hp": max_hp,
+                    "combat_participation": str(token.get("combat_participation", "active")),
                 }
 
                 raw_team_id = token.get("team_id")
@@ -383,6 +385,7 @@ class InitiativeManagerDialog(QDialog):
         self._clear_team_bucket_layout()
         self._team_bucket_lists.clear()
         self._team_bucket_headers.clear()
+        self._team_participation_buttons.clear()
         self._team_bucket_order = []
 
         if self._team_count <= 0:
@@ -402,9 +405,17 @@ class InitiativeManagerDialog(QDialog):
             row_layout.setContentsMargins(8, 8, 8, 8)
             row_layout.setSpacing(4)
 
+            header_row = QHBoxLayout()
             header_label = QLabel(row_widget)
             header_label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
-            row_layout.addWidget(header_label)
+            header_row.addWidget(header_label, 1)
+            if isinstance(bucket_key, int) and bucket_key > 0:
+                participation_button = QPushButton("Set Reserve", row_widget)
+                participation_button.setToolTip("Toggle this team's tokens between Active and Reserve.")
+                participation_button.clicked.connect(lambda _checked=False, team_id=bucket_key: self._toggle_team_participation(team_id))
+                header_row.addWidget(participation_button)
+                self._team_participation_buttons[bucket_key] = participation_button
+            row_layout.addLayout(header_row)
 
             bucket_list = _TeamBucketListWidget(row_widget)
             bucket_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -483,6 +494,32 @@ class InitiativeManagerDialog(QDialog):
             if header is None or bucket_list is None:
                 continue
             header.setText(self._bucket_title(bucket_key, bucket_list.count()))
+        self._refresh_team_participation_buttons()
+
+    def _refresh_team_participation_buttons(self) -> None:
+        for team_id, button in self._team_participation_buttons.items():
+            token_ids = [
+                token_id
+                for token_id, assigned_team_id in self._team_assignments_by_token_id.items()
+                if assigned_team_id == team_id
+            ]
+            reserve_count = 0
+            active_count = 0
+            for token_id in token_ids:
+                meta = self._team_token_meta_by_id.get(token_id, {})
+                participation = str(meta.get("combat_participation", "active")).strip().lower()
+                if participation == "reserve":
+                    reserve_count += 1
+                else:
+                    active_count += 1
+            button.setText("Set Active" if reserve_count > active_count else "Set Reserve")
+
+    def _toggle_team_participation(self, team_id: int) -> None:
+        button = self._team_participation_buttons.get(team_id)
+        target = "active" if button and button.text() == "Set Active" else "reserve"
+        if hasattr(self._battle_map_widget, "set_team_combat_participation"):
+            self._battle_map_widget.set_team_combat_participation(team_id, target)
+        self.refresh_from_source()
 
     def _handle_team_bucket_drop(self) -> None:
         if self._is_refreshing_teams_ui:

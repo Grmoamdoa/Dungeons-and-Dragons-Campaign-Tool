@@ -1551,6 +1551,8 @@ class TimelineEditorWidget(QWidget):
             clip_data.setdefault("grid_size", DEFAULT_GRID_SIZE); clip_data.setdefault("grid_offset_x", DEFAULT_GRID_OFFSET)
             clip_data.setdefault("grid_offset_y", DEFAULT_GRID_OFFSET); clip_data.setdefault("tokens", [])
             clip_data.setdefault("fog_squares", [])
+            clip_data.setdefault("active_tier_id", "tier_1")
+            clip_data.setdefault("map_tiers", [])
             try:
                 clip_data["battle_setup_revision"] = max(0, int(clip_data.get("battle_setup_revision", 0)))
             except (TypeError, ValueError):
@@ -1669,6 +1671,8 @@ class TimelineEditorWidget(QWidget):
                     "grid_offset_y": clip_data.get("grid_offset_y"),
                     "tokens": copy.deepcopy(clip_data.get("tokens", [])),
                     "fog_squares": copy.deepcopy(clip_data.get("fog_squares", [])),
+                    "active_tier_id": clip_data.get("active_tier_id"),
+                    "map_tiers": copy.deepcopy(clip_data.get("map_tiers", [])),
                 }
                 updated_settings = dialog.get_settings()
                 clip_data.update(updated_settings)
@@ -1683,6 +1687,8 @@ class TimelineEditorWidget(QWidget):
                     "grid_offset_y": clip_data.get("grid_offset_y"),
                     "tokens": copy.deepcopy(clip_data.get("tokens", [])),
                     "fog_squares": copy.deepcopy(clip_data.get("fog_squares", [])),
+                    "active_tier_id": clip_data.get("active_tier_id"),
+                    "map_tiers": copy.deepcopy(clip_data.get("map_tiers", [])),
                 }
                 if before_authored_settings != after_authored_settings:
                     try:

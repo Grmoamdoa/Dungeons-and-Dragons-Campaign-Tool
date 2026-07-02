@@ -133,6 +133,8 @@ You build clips in the timeline, trigger encounters from battle markers, then re
 - Player-view battle camera can be toggled from `View -> Player Battle: Follow DM Camera`.
   - On: the player view follows DM pan/zoom, but clamps to the map and falls back to the normal full-map render if the DM zooms out beyond what the player view can show cleanly.
   - Off: the player view stays on the normal full-map battle render.
+- Player-view battle zoom can be toggled from `View -> Player Battle: Follow DM Zoom`.
+  - On: when full DM camera follow is off, the player view uses the DM zoom level while staying centered on the map.
 - Player-view battle rendering mode can be toggled from `View -> Player Battle: Preserve Aspect Ratio`.
   - On (default): preserves map aspect ratio (no stretching, may letterbox).
   - Off: fills the player screen.

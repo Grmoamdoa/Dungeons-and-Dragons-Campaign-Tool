@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QSizePolicy, QFrame,
     QListWidget, QCheckBox, QSpinBox, QPlainTextEdit,
     QMenu, QInputDialog, QApplication, QMessageBox,
-    QDialog
+    QDialog, QComboBox
 )
 from PyQt6.QtGui import (
      QResizeEvent, QDragEnterEvent, QDropEvent, QDragMoveEvent, QMouseEvent, QWheelEvent,
@@ -128,6 +128,10 @@ GRID_LINE_COLOR = QColor(100, 100, 100, 180)
 GRID_LINE_WIDTH = 1 # In map pixels
 DEFAULT_MAP_PATH = ""
 DEFAULT_GRID_SIZE = 50
+DEFAULT_TIER_ID = "tier_1"
+MAX_MAP_TIERS = 12
+COMBAT_PARTICIPATION_ACTIVE = "active"
+COMBAT_PARTICIPATION_RESERVE = "reserve"
 INITIATIVE_ORDER_WIDTH = 200 # Adjusted for potentially wider status text
 INITIATIVE_ORDER_PADDING = 10
 INITIATIVE_ORDER_BG_COLOR = QColor(0, 0, 0, 170) # Same as log for consistency
@@ -323,6 +327,7 @@ class BattleMapWidget(QWidget):
         self._token_pixmap_cache = {} # Cache source token pixmaps
         self._token_overlay_pixmap_cache = {} # Cache source-sized status overlays by (path, rgba)
         self._scaled_token_pixmap_cache = {} # Cache scaled token pixmaps by (path, target_width)
+        self._tier_map_pixmap_cache: dict[str, QPixmap] = {}
         self._all_fog_texture: Optional[QPixmap] = None
         self._current_map_path = ""
         self._zoom_level = 1.0
@@ -330,6 +335,8 @@ class BattleMapWidget(QWidget):
         self.log_font = QFont("Monospace", 9)
 
         self.tokens_on_map = [] # List of dicts for token instances
+        self._map_tiers: list[dict[str, Any]] = []
+        self._active_tier_id = DEFAULT_TIER_ID
         self.fog_squares: dict[tuple[int, int], dict[str, Any]] = {}
         self._fog_add_enabled = False
         self._fog_mode = DEFAULT_FOG_MODE
@@ -353,6 +360,11 @@ class BattleMapWidget(QWidget):
         self._team_count = 0
         self._full_manual_mode = False
         self._needs_initial_fit = False
+        self._stage_selector = QComboBox(self)
+        self._stage_selector.setToolTip("Current encounter stage")
+        self._stage_selector.setMinimumWidth(160)
+        self._stage_selector.hide()
+        self._stage_selector.currentIndexChanged.connect(self._handle_stage_selector_changed)
 
         # Mode-specific states
         self.is_selecting_move_target = False
@@ -1031,7 +1043,7 @@ class BattleMapWidget(QWidget):
 
         any_changed = False
         expired_logs: list[str] = []
-        for token_data in self.tokens_on_map:
+        for token_data in self._all_tier_tokens():
             if not isinstance(token_data, dict):
                 continue
             active_conditions = token_data.get("active_conditions")
@@ -1315,7 +1327,7 @@ class BattleMapWidget(QWidget):
         sanitized = str(message) if message is not None else ""
         replacement_map: dict[str, str] = {}
 
-        for token_data in self.tokens_on_map:
+        for token_data in self._all_tier_tokens():
             raw_name = token_data.get("name")
             if not isinstance(raw_name, str) or not raw_name:
                 continue
@@ -1591,6 +1603,7 @@ class BattleMapWidget(QWidget):
     def resizeEvent(self, event: QResizeEvent):
         super().resizeEvent(event)
         print(f"DEBUG: Resize Event - New Size: {event.size()}")
+        self._position_stage_selector()
         self._perform_initial_fit_if_needed()
         self._update_log_panel_geometry()
         self.update()
@@ -2035,12 +2048,322 @@ class BattleMapWidget(QWidget):
         painter.setFont(font) # Ensure font is reset if last item was bold
 
     # --- Encounter Loading ---
+    @staticmethod
+    def normalize_combat_participation(raw_value: Any) -> str:
+        value = str(raw_value or COMBAT_PARTICIPATION_ACTIVE).strip().lower()
+        return COMBAT_PARTICIPATION_RESERVE if value == COMBAT_PARTICIPATION_RESERVE else COMBAT_PARTICIPATION_ACTIVE
+
+    def _normalize_map_tiers(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_tiers = data.get("map_tiers", [])
+        tiers: list[dict[str, Any]] = []
+        if isinstance(raw_tiers, list):
+            for index, raw_tier in enumerate(raw_tiers[:MAX_MAP_TIERS]):
+                if not isinstance(raw_tier, dict):
+                    continue
+                tier_id = str(raw_tier.get("id") or f"tier_{index + 1}")
+                tiers.append({
+                    "id": tier_id,
+                    "name": str(raw_tier.get("name") or f"Stage {index + 1}"),
+                    "map_path": str(raw_tier.get("map_path", "")),
+                    "show_grid": bool(raw_tier.get("show_grid", True)),
+                    "grid_size": int(raw_tier.get("grid_size", DEFAULT_GRID_SIZE)),
+                    "grid_offset_x": int(raw_tier.get("grid_offset_x", 0)),
+                    "grid_offset_y": int(raw_tier.get("grid_offset_y", 0)),
+                    "tokens": [dict(token) for token in raw_tier.get("tokens", []) if isinstance(token, dict)],
+                    "fog_squares": self.serialize_fog_squares(self.normalize_fog_squares(raw_tier.get("fog_squares", []))),
+                })
+        if not tiers:
+            tiers = [{
+                "id": DEFAULT_TIER_ID,
+                "name": "Stage 1",
+                "map_path": str(data.get("map_path", DEFAULT_MAP_PATH)),
+                "show_grid": bool(data.get("show_grid", True)),
+                "grid_size": int(data.get("grid_size", DEFAULT_GRID_SIZE)),
+                "grid_offset_x": int(data.get("grid_offset_x", 0)),
+                "grid_offset_y": int(data.get("grid_offset_y", 0)),
+                "tokens": [dict(token) for token in data.get("tokens", []) if isinstance(token, dict)],
+                "fog_squares": self.serialize_fog_squares(self.normalize_fog_squares(data.get("fog_squares", []))),
+            }]
+        return tiers
+
+    def _active_tier(self) -> dict[str, Any]:
+        for tier in self._map_tiers:
+            if tier.get("id") == self._active_tier_id:
+                return tier
+        if not self._map_tiers:
+            self._map_tiers = self._normalize_map_tiers({})
+        self._active_tier_id = str(self._map_tiers[0].get("id") or DEFAULT_TIER_ID)
+        return self._map_tiers[0]
+
+    def _all_tier_tokens(self) -> list[dict[str, Any]]:
+        tokens: list[dict[str, Any]] = []
+        active_id = self._active_tier_id
+        for tier in self._map_tiers:
+            tier_tokens = self.tokens_on_map if tier.get("id") == active_id else tier.get("tokens", [])
+            if isinstance(tier_tokens, list):
+                tokens.extend([token for token in tier_tokens if isinstance(token, dict)])
+        if not self._map_tiers:
+            tokens.extend([token for token in self.tokens_on_map if isinstance(token, dict)])
+        return tokens
+
+    def _find_token_by_id_any_tier(self, token_id: Any) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+        if not isinstance(token_id, str) or not token_id:
+            return None, None
+        for tier in self._map_tiers:
+            tier_id = str(tier.get("id") or "")
+            tier_tokens = self.tokens_on_map if tier_id == self._active_tier_id else tier.get("tokens", [])
+            if not isinstance(tier_tokens, list):
+                continue
+            for token in tier_tokens:
+                if isinstance(token, dict) and token.get("id") == token_id:
+                    return token, tier_id
+        for token in self.tokens_on_map:
+            if isinstance(token, dict) and token.get("id") == token_id:
+                return token, self._active_tier_id
+        return None, None
+
+    def _commit_current_tier_state(self):
+        tier = self._active_tier()
+        tier["map_path"] = self._current_map_path
+        tier["show_grid"] = bool(self.show_grid)
+        tier["grid_size"] = int(self.grid_size_px)
+        tier["grid_offset_x"] = int(self.grid_offset_x)
+        tier["grid_offset_y"] = int(self.grid_offset_y)
+        tier["tokens"] = self.tokens_on_map
+        tier["fog_squares"] = self.serialize_fog_squares(self.fog_squares)
+
+    def _materialize_tier_tokens(self, tier: dict[str, Any]) -> list[dict[str, Any]]:
+        tier_id = str(tier.get("id") or DEFAULT_TIER_ID)
+        tier_name = str(tier.get("name") or tier_id)
+        materialized: list[dict[str, Any]] = []
+        raw_tokens = tier.get("tokens", [])
+        if not isinstance(raw_tokens, list):
+            return materialized
+        for raw_token in raw_tokens:
+            if not isinstance(raw_token, dict):
+                continue
+            if raw_token.get("rect_on_map") is not None and raw_token.get("qpixmap") is not None:
+                raw_token["tier_id"] = tier_id
+                raw_token["tier_name"] = tier_name
+                materialized.append(raw_token)
+                continue
+            token_path = raw_token.get("path")
+            if not isinstance(token_path, str) or not token_path or not os.path.exists(token_path):
+                continue
+            try:
+                grid_x = int(raw_token.get("grid_x"))
+                grid_y = int(raw_token.get("grid_y"))
+            except (TypeError, ValueError):
+                continue
+            profile = self._get_or_create_token_profile(token_path)
+            token_name = ensure_profile_name(profile, token_path) if isinstance(profile, dict) else normalize_profile_name(raw_token.get("name"), token_path)
+            max_hp = int(raw_token.get("max_hp", profile.get("max_hp", DEFAULT_TOKEN_MAX_HP) if isinstance(profile, dict) else DEFAULT_TOKEN_MAX_HP))
+            hp = int(raw_token.get("hp", raw_token.get("current_hp", profile.get("current_hp", max_hp) if isinstance(profile, dict) else max_hp)))
+            footprint_w, footprint_h = get_footprint_dimensions(raw_token if ("footprint_w" in raw_token or "footprint_h" in raw_token) else profile)
+            initiative = raw_token.get("initiative")
+            try:
+                initiative = int(initiative) if initiative not in (None, "") else None
+            except (TypeError, ValueError):
+                initiative = None
+            token_data = {
+                "qpixmap": None,
+                "rect_on_map": QRectF(),
+                "id": str(raw_token.get("id") or uuid.uuid4()),
+                "path": token_path,
+                "skin_path": self._normalize_optional_path(raw_token.get("skin_path")),
+                "name": token_name,
+                "grid_x": grid_x,
+                "grid_y": grid_y,
+                "hp": hp,
+                "max_hp": max_hp,
+                "speed": int(raw_token.get("speed", profile.get("speed", DEFAULT_TOKEN_SPEED_FT) if isinstance(profile, dict) else DEFAULT_TOKEN_SPEED_FT)),
+                "ac": int(raw_token.get("ac", profile.get("ac", DEFAULT_AC) if isinstance(profile, dict) else DEFAULT_AC)),
+                "initiative_bonus": int(raw_token.get("initiative_bonus", profile.get("initiative_bonus", DEFAULT_INIT_BONUS) if isinstance(profile, dict) else DEFAULT_INIT_BONUS)),
+                "dex_bonus": int(raw_token.get("dex_bonus", profile.get("dex_bonus", 0) if isinstance(profile, dict) else 0)),
+                "footprint_w": footprint_w,
+                "footprint_h": footprint_h,
+                "rotation_quarters": self._normalize_token_rotation_quarters(raw_token.get("rotation_quarters", 0)),
+                "visual_fit_mode": normalize_visual_fit_mode(raw_token.get("visual_fit_mode", DEFAULT_TOKEN_VISUAL_FIT_MODE)),
+                "initiative": initiative,
+                "team_id": raw_token.get("team_id"),
+                "combat_participation": self.normalize_combat_participation(raw_token.get("combat_participation")),
+                "tier_id": tier_id,
+                "tier_name": tier_name,
+                "oa_reaction_used_round": raw_token.get("oa_reaction_used_round"),
+                "readied_reaction_armed": bool(raw_token.get("readied_reaction_armed", False)),
+                "status": str(raw_token.get("status", "alive")),
+                "death_saves_success": int(raw_token.get("death_saves_success", 0)),
+                "death_saves_fail": int(raw_token.get("death_saves_fail", 0)),
+                "active_conditions": set(raw_token.get("active_conditions", [])) if isinstance(raw_token.get("active_conditions", []), (list, set)) else set(),
+                "condition_ring_order": list(raw_token.get("condition_ring_order", [])) if isinstance(raw_token.get("condition_ring_order", []), list) else [],
+                "condition_details": dict(raw_token.get("condition_details", {})) if isinstance(raw_token.get("condition_details", {}), dict) else {},
+                "concentration_rounds_remaining": raw_token.get("concentration_rounds_remaining"),
+                "notes": raw_token.get("notes", "") if isinstance(raw_token.get("notes"), str) else "",
+                "is_generated": bool(raw_token.get("is_generated", False)),
+            }
+            if self._refresh_token_runtime_pixmap(token_data):
+                self._rebuild_token_rect_from_grid(token_data)
+                materialized.append(token_data)
+        tier["tokens"] = materialized
+        return materialized
+
+    def _serialize_runtime_tokens(self, tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        serialized_tokens: list[dict[str, Any]] = []
+        for token in tokens:
+            if not isinstance(token, dict):
+                continue
+            footprint_w, footprint_h = self._get_token_footprint(token)
+            conditions = token.get("active_conditions", set())
+            if isinstance(conditions, set):
+                serialized_conditions = sorted(list(conditions))
+            elif isinstance(conditions, list):
+                serialized_conditions = sorted([str(c) for c in conditions])
+            else:
+                serialized_conditions = []
+            serialized_condition_set = set(serialized_conditions)
+            raw_condition_ring_order = token.get("condition_ring_order", [])
+            serialized_condition_ring_order = [
+                str(c) for c in raw_condition_ring_order if str(c) in serialized_condition_set
+            ] if isinstance(raw_condition_ring_order, list) else []
+            raw_condition_details = token.get("condition_details", {})
+            serialized_condition_details: dict[str, dict[str, Any]] = {}
+            if isinstance(raw_condition_details, dict):
+                for cond_name, cond_meta in raw_condition_details.items():
+                    if not isinstance(cond_name, str) or cond_name not in serialized_condition_set or not isinstance(cond_meta, dict):
+                        continue
+                    try:
+                        rounds_remaining = int(cond_meta.get("duration_rounds_remaining", 0))
+                    except (TypeError, ValueError):
+                        rounds_remaining = 0
+                    if rounds_remaining < 1:
+                        continue
+                    tick_phase = str(cond_meta.get("tick_phase", "end")).strip().lower()
+                    if tick_phase not in CONDITION_DURATION_TICK_PHASES:
+                        tick_phase = "end"
+                    tick_anchor = str(cond_meta.get("tick_anchor", "target")).strip().lower()
+                    if tick_anchor not in {"target", "actor"}:
+                        tick_anchor = "target"
+                    tick_token_id = cond_meta.get("tick_token_id")
+                    serialized_condition_details[cond_name] = {
+                        "duration_rounds_remaining": rounds_remaining,
+                        "tick_phase": tick_phase,
+                        "tick_anchor": tick_anchor,
+                        "tick_token_id": tick_token_id if isinstance(tick_token_id, str) and tick_token_id else None,
+                        "applied_round": cond_meta.get("applied_round") if isinstance(cond_meta.get("applied_round"), int) else None,
+                    }
+            serialized_tokens.append({
+                "id": token.get("id"),
+                "path": token.get("path"),
+                "skin_path": self._normalize_optional_path(token.get("skin_path")),
+                "name": token.get("name"),
+                "grid_x": token.get("grid_x"),
+                "grid_y": token.get("grid_y"),
+                "hp": token.get("hp"),
+                "max_hp": token.get("max_hp"),
+                "speed": token.get("speed"),
+                "ac": token.get("ac"),
+                "initiative_bonus": token.get("initiative_bonus"),
+                "dex_bonus": token.get("dex_bonus"),
+                "footprint_w": footprint_w,
+                "footprint_h": footprint_h,
+                "rotation_quarters": self._get_token_rotation_quarters(token),
+                "visual_fit_mode": self._get_token_visual_fit_mode(token),
+                "size_squares": footprint_w if footprint_w == footprint_h else None,
+                "initiative": token.get("initiative"),
+                "team_id": token.get("team_id"),
+                "combat_participation": self.normalize_combat_participation(token.get("combat_participation")),
+                "tier_id": token.get("tier_id"),
+                "oa_reaction_used_round": token.get("oa_reaction_used_round"),
+                "readied_reaction_armed": bool(token.get("readied_reaction_armed", False)),
+                "status": token.get("status"),
+                "death_saves_success": token.get("death_saves_success", 0),
+                "death_saves_fail": token.get("death_saves_fail", 0),
+                "active_conditions": serialized_conditions,
+                "condition_ring_order": serialized_condition_ring_order,
+                "condition_details": serialized_condition_details,
+                "notes": token.get("notes", "") if isinstance(token.get("notes"), str) else "",
+                "is_generated": bool(token.get("is_generated", False)),
+                "concentration_rounds_remaining": (
+                    token.get("concentration_rounds_remaining")
+                    if isinstance(token.get("concentration_rounds_remaining"), int)
+                    and token.get("concentration_rounds_remaining", 0) >= 1
+                    else None
+                ),
+            })
+        return serialized_tokens
+
+    def _position_stage_selector(self):
+        if not hasattr(self, "_stage_selector"):
+            return
+        self._stage_selector.move(12, 12)
+        self._stage_selector.raise_()
+
+    def _refresh_stage_selector(self):
+        self._stage_selector.blockSignals(True)
+        self._stage_selector.clear()
+        for tier in self._map_tiers:
+            self._stage_selector.addItem(str(tier.get("name") or tier.get("id") or "Stage"), str(tier.get("id") or ""))
+        active_index = max(0, self._stage_selector.findData(self._active_tier_id))
+        self._stage_selector.setCurrentIndex(active_index)
+        self._stage_selector.setVisible(len(self._map_tiers) > 1)
+        self._stage_selector.blockSignals(False)
+        self._position_stage_selector()
+
+    def _load_tier_into_view(self, tier_id: str):
+        tier = next((entry for entry in self._map_tiers if entry.get("id") == tier_id), None)
+        if not isinstance(tier, dict):
+            return
+        self._active_tier_id = tier_id
+        self.show_grid = bool(tier.get("show_grid", True))
+        self.grid_size_px = int(tier.get("grid_size", DEFAULT_GRID_SIZE))
+        self.grid_offset_x = int(tier.get("grid_offset_x", 0))
+        self.grid_offset_y = int(tier.get("grid_offset_y", 0))
+        self.fog_squares = self.normalize_fog_squares(tier.get("fog_squares", []))
+        self.tokens_on_map = self._materialize_tier_tokens(tier)
+        for token in self.tokens_on_map:
+            if isinstance(token, dict):
+                token["tier_id"] = tier_id
+                token["tier_name"] = str(tier.get("name") or tier_id)
+                self._rebuild_token_rect_from_grid(token)
+        self._selected_token_index = None
+        self._load_map_image(str(tier.get("map_path", DEFAULT_MAP_PATH)))
+        self._refresh_stage_selector()
+        self.rebuild_initiative_order(preserve_active_token=True)
+        self.tokenDataModified.emit()
+
+    @pyqtSlot(int)
+    def _handle_stage_selector_changed(self, index: int):
+        tier_id = self._stage_selector.itemData(index)
+        if isinstance(tier_id, str) and tier_id and tier_id != self._active_tier_id:
+            self.switch_to_tier(tier_id)
+
+    def switch_to_tier(self, tier_id: str):
+        if not any(tier.get("id") == tier_id for tier in self._map_tiers):
+            return
+        if tier_id == self._active_tier_id:
+            return
+        self._cancel_any_selection()
+        self._commit_current_tier_state()
+        self._load_tier_into_view(tier_id)
+
+    def switch_relative_tier(self, delta: int):
+        if len(self._map_tiers) <= 1:
+            return
+        ids = [str(tier.get("id") or "") for tier in self._map_tiers]
+        try:
+            current_index = ids.index(self._active_tier_id)
+        except ValueError:
+            current_index = 0
+        self.switch_to_tier(ids[(current_index + delta) % len(ids)])
+
     def load_encounter(self, encounter_data: dict):
         enc_name = encounter_data.get('name', 'Default Encounter')
         self.logMessageGenerated.emit(f"The stage is set... Welcome to '{enc_name}'.")
         self._pending_encounter_data = encounter_data.copy() 
         print("Clearing previous encounter state...")
         self.tokens_on_map.clear()
+        self._map_tiers = []
+        self._active_tier_id = DEFAULT_TIER_ID
         self._selected_token_index = None
         self._map_pixmap = None 
         self._current_map_path = "" 
@@ -2064,6 +2387,7 @@ class BattleMapWidget(QWidget):
         self._token_pixmap_cache.clear()
         self._token_overlay_pixmap_cache.clear()
         self._scaled_token_pixmap_cache.clear()
+        self._tier_map_pixmap_cache.clear()
         print("Previous state cleared.")
         self._apply_pending_encounter_data()
         self._reset_opportunity_attack_reactions()
@@ -2079,14 +2403,20 @@ class BattleMapWidget(QWidget):
         data = self._pending_encounter_data 
         
         self.encounter_name = data.get("name", "Unnamed Encounter")
-        map_path = data.get("map_path", DEFAULT_MAP_PATH)
-        self.show_grid = data.get("show_grid", True)
-        self.grid_size_px = data.get("grid_size", DEFAULT_GRID_SIZE)
-        self.grid_offset_x = data.get("grid_offset_x", 0)
-        self.grid_offset_y = data.get("grid_offset_y", 0)
-        self.fog_squares = self.normalize_fog_squares(data.get("fog_squares", []))
+        self._map_tiers = self._normalize_map_tiers(data)
+        requested_tier_id = str(data.get("active_tier_id") or self._map_tiers[0].get("id") or DEFAULT_TIER_ID)
+        if not any(tier.get("id") == requested_tier_id for tier in self._map_tiers):
+            requested_tier_id = str(self._map_tiers[0].get("id") or DEFAULT_TIER_ID)
+        self._active_tier_id = requested_tier_id
+        active_tier = self._active_tier()
+        map_path = active_tier.get("map_path", DEFAULT_MAP_PATH)
+        self.show_grid = active_tier.get("show_grid", True)
+        self.grid_size_px = active_tier.get("grid_size", DEFAULT_GRID_SIZE)
+        self.grid_offset_x = active_tier.get("grid_offset_x", 0)
+        self.grid_offset_y = active_tier.get("grid_offset_y", 0)
+        self.fog_squares = self.normalize_fog_squares(active_tier.get("fog_squares", []))
         self._load_map_image(map_path)
-        initial_tokens_data = data.get("tokens", [])
+        initial_tokens_data = active_tier.get("tokens", [])
         print(f"Applying {len(initial_tokens_data)} initial tokens...")
         if initial_tokens_data:
             for token_instance_info in initial_tokens_data:
@@ -2152,13 +2482,16 @@ class BattleMapWidget(QWidget):
                     'speed': speed,
                     'ac': ac,
                     'initiative_bonus': init_bonus, 
-                    'id': str(uuid.uuid4()),        
+                    'id': str(token_instance_info.get('id') or uuid.uuid4()),
                     'dex_bonus': dex_bonus,         
                     'footprint_w': footprint_w,
                     'footprint_h': footprint_h,
                     'rotation_quarters': 0,
                     'visual_fit_mode': visual_fit_mode,
                     'initiative': instance_initiative,
+                    'combat_participation': self.normalize_combat_participation(token_instance_info.get('combat_participation')),
+                    'tier_id': self._active_tier_id,
+                    'tier_name': str(active_tier.get("name") or self._active_tier_id),
                     'team_id': None,
                     'oa_reaction_used_round': None,
                     'readied_reaction_armed': False,
@@ -2179,10 +2512,17 @@ class BattleMapWidget(QWidget):
                     self.tokens_on_map.append(token_map_instance_data)
                 else:
                     print(f"ERROR applying initial token {token_path} at ({grid_x},{grid_y}) - pixmap load failed")
+        active_tier["tokens"] = self.tokens_on_map
+        for tier in self._map_tiers:
+            if tier is active_tier:
+                continue
+            self._materialize_tier_tokens(tier)
+        self._refresh_stage_selector()
         print(f"Finished applying encounter. Tokens on map: {len(self.tokens_on_map)}")
 
     def export_runtime_state(self) -> dict[str, Any]:
         """Serialize current in-encounter state for project persistence."""
+        self._commit_current_tier_state()
         runtime_tokens: list[dict[str, Any]] = []
         for token in self.tokens_on_map:
             footprint_w, footprint_h = self._get_token_footprint(token)
@@ -2272,6 +2612,26 @@ class BattleMapWidget(QWidget):
                 ),
             })
 
+        serialized_tiers: list[dict[str, Any]] = []
+        active_serialized_tokens: list[dict[str, Any]] = []
+        for index, tier in enumerate(self._map_tiers):
+            tier_id = str(tier.get("id") or f"tier_{index + 1}")
+            tier_tokens = self._serialize_runtime_tokens(tier.get("tokens", []) if isinstance(tier.get("tokens"), list) else [])
+            if tier_id == self._active_tier_id:
+                active_serialized_tokens = tier_tokens
+            serialized_tiers.append({
+                "id": tier_id,
+                "name": str(tier.get("name") or f"Stage {index + 1}"),
+                "map_path": str(tier.get("map_path", "")),
+                "show_grid": bool(tier.get("show_grid", True)),
+                "grid_size": int(tier.get("grid_size", DEFAULT_GRID_SIZE)),
+                "grid_offset_x": int(tier.get("grid_offset_x", 0)),
+                "grid_offset_y": int(tier.get("grid_offset_y", 0)),
+                "tokens": tier_tokens,
+                "fog_squares": list(tier.get("fog_squares", [])),
+            })
+        runtime_tokens = active_serialized_tokens or self._serialize_runtime_tokens(self.tokens_on_map)
+
         initiative_order_ids = [
             token.get("id")
             for token in self.initiative_order
@@ -2280,6 +2640,8 @@ class BattleMapWidget(QWidget):
 
         return {
             "encounter_name": self.encounter_name,
+            "active_tier_id": self._active_tier_id,
+            "map_tiers": serialized_tiers,
             "map_path": self._current_map_path,
             "show_grid": self.show_grid,
             "grid_size": self.grid_size_px,
@@ -2519,6 +2881,41 @@ class BattleMapWidget(QWidget):
             preserve_aspect=preserve_aspect,
         )
 
+    def render_player_stage_frame(self, tier_id: str, target_size: QSize, preserve_aspect: bool = False) -> QPixmap:
+        if not tier_id or tier_id == self._active_tier_id:
+            return self.render_player_cinematic_frame(target_size, preserve_aspect=preserve_aspect)
+        self._commit_current_tier_state()
+        tier = next((entry for entry in self._map_tiers if entry.get("id") == tier_id), None)
+        if not isinstance(tier, dict):
+            return self.render_player_cinematic_frame(target_size, preserve_aspect=preserve_aspect)
+
+        map_path = str(tier.get("map_path", ""))
+        cached_pixmap = self._tier_map_pixmap_cache.get(map_path)
+        if cached_pixmap is None:
+            cached_pixmap = QPixmap(map_path) if map_path and os.path.exists(map_path) else QPixmap()
+            self._tier_map_pixmap_cache[map_path] = cached_pixmap
+        if cached_pixmap.isNull():
+            frame = QPixmap(int(max(1, target_size.width())), int(max(1, target_size.height())))
+            frame.fill(QColor("#000000"))
+            return frame
+
+        old_map_pixmap = self._map_pixmap
+        old_tokens = self.tokens_on_map
+        old_fog = self.fog_squares
+        try:
+            self._map_pixmap = cached_pixmap
+            self.tokens_on_map = self._materialize_tier_tokens(tier)
+            self.fog_squares = self.normalize_fog_squares(tier.get("fog_squares", []))
+            return self._render_player_battle_frame(
+                target_size,
+                QRectF(0.0, 0.0, float(cached_pixmap.width()), float(cached_pixmap.height())),
+                preserve_aspect=preserve_aspect,
+            )
+        finally:
+            self._map_pixmap = old_map_pixmap
+            self.tokens_on_map = old_tokens
+            self.fog_squares = old_fog
+
     def render_player_follow_camera_frame(
         self,
         target_size: QSize,
@@ -2581,16 +2978,99 @@ class BattleMapWidget(QWidget):
             preserve_aspect=False,
         )
 
+    def render_player_follow_zoom_frame(
+        self,
+        target_size: QSize,
+        fallback_preserve_aspect: bool = True,
+    ) -> QPixmap:
+        if not self._map_pixmap or self._map_pixmap.isNull() or self._zoom_level <= 0:
+            return self.render_player_cinematic_frame(
+                target_size,
+                preserve_aspect=fallback_preserve_aspect,
+            )
+
+        target_w = int(max(1, target_size.width()))
+        target_h = int(max(1, target_size.height()))
+        if target_w <= 1 or target_h <= 1:
+            return self.render_player_cinematic_frame(
+                target_size,
+                preserve_aspect=fallback_preserve_aspect,
+            )
+
+        map_w = float(self._map_pixmap.width())
+        map_h = float(self._map_pixmap.height())
+        desired_view_w = float(target_w) / self._zoom_level
+        desired_view_h = float(target_h) / self._zoom_level
+        if desired_view_w >= map_w or desired_view_h >= map_h:
+            return self.render_player_cinematic_frame(
+                target_size,
+                preserve_aspect=fallback_preserve_aspect,
+            )
+
+        half_w = desired_view_w / 2.0
+        half_h = desired_view_h / 2.0
+        max_center_x = map_w - half_w
+        max_center_y = map_h - half_h
+        if max_center_x < half_w or max_center_y < half_h:
+            return self.render_player_cinematic_frame(
+                target_size,
+                preserve_aspect=fallback_preserve_aspect,
+            )
+
+        center_x = min(max(map_w / 2.0, half_w), max_center_x)
+        center_y = min(max(map_h / 2.0, half_h), max_center_y)
+        player_view_rect = QRectF(
+            center_x - half_w,
+            center_y - half_h,
+            desired_view_w,
+            desired_view_h,
+        )
+        return self._render_player_battle_frame(
+            target_size,
+            player_view_rect,
+            preserve_aspect=False,
+        )
+
     def apply_runtime_state(self, runtime_state: dict[str, Any]) -> None:
         """Restore previously saved in-encounter runtime state."""
         if not isinstance(runtime_state, dict):
             return
+        top_level_runtime_tokens = runtime_state.get("tokens", [])
+        authored_view_tokens = list(self.tokens_on_map)
 
         def to_int(value: Any, default: int) -> int:
             try:
                 return int(value)
             except (TypeError, ValueError):
                 return default
+
+        if isinstance(runtime_state.get("map_tiers"), list):
+            self._map_tiers = self._normalize_map_tiers(runtime_state)
+            requested_tier_id = str(runtime_state.get("active_tier_id") or self._active_tier_id)
+            if not any(tier.get("id") == requested_tier_id for tier in self._map_tiers):
+                requested_tier_id = str(self._map_tiers[0].get("id") or DEFAULT_TIER_ID)
+            self._active_tier_id = requested_tier_id
+            for tier in self._map_tiers:
+                self._materialize_tier_tokens(tier)
+            active_tier = self._active_tier()
+            runtime_state = dict(runtime_state)
+            runtime_state["map_path"] = active_tier.get("map_path", runtime_state.get("map_path"))
+            runtime_state["show_grid"] = active_tier.get("show_grid", runtime_state.get("show_grid"))
+            runtime_state["grid_size"] = active_tier.get("grid_size", runtime_state.get("grid_size"))
+            runtime_state["grid_offset_x"] = active_tier.get("grid_offset_x", runtime_state.get("grid_offset_x"))
+            runtime_state["grid_offset_y"] = active_tier.get("grid_offset_y", runtime_state.get("grid_offset_y"))
+            runtime_state["fog_squares"] = active_tier.get("fog_squares", runtime_state.get("fog_squares", []))
+            active_tier_tokens = active_tier.get("tokens", [])
+            if active_tier_tokens:
+                runtime_state["tokens"] = active_tier_tokens
+            elif isinstance(top_level_runtime_tokens, list) and top_level_runtime_tokens:
+                runtime_state["tokens"] = top_level_runtime_tokens
+                active_tier["tokens"] = top_level_runtime_tokens
+            elif authored_view_tokens:
+                runtime_state["tokens"] = authored_view_tokens
+                active_tier["tokens"] = authored_view_tokens
+            else:
+                runtime_state["tokens"] = active_tier_tokens
 
         runtime_map_path = runtime_state.get("map_path")
         if isinstance(runtime_map_path, str) and runtime_map_path and runtime_map_path != self._current_map_path:
@@ -2728,6 +3208,9 @@ class BattleMapWidget(QWidget):
                     "rotation_quarters": rotation_quarters,
                     "visual_fit_mode": visual_fit_mode,
                     "initiative": runtime_initiative,
+                    "combat_participation": self.normalize_combat_participation(raw_token.get("combat_participation")),
+                    "tier_id": self._active_tier_id,
+                    "tier_name": str(self._active_tier().get("name") or self._active_tier_id),
                     "team_id": None,
                     "oa_reaction_used_round": None,
                     "readied_reaction_armed": bool(raw_token.get("readied_reaction_armed", False)),
@@ -2763,9 +3246,10 @@ class BattleMapWidget(QWidget):
                 self._rebuild_token_rect_from_grid(token_data)
                 self.tokens_on_map.append(token_data)
 
+        self._active_tier()["tokens"] = self.tokens_on_map
         id_to_token = {
             token.get("id"): token
-            for token in self.tokens_on_map
+            for token in self._all_tier_tokens()
             if isinstance(token, dict) and token.get("id")
         }
         order_ids = runtime_state.get("initiative_order_ids", [])
@@ -2808,15 +3292,19 @@ class BattleMapWidget(QWidget):
                 self._current_turn_index = -1
 
         self._cancel_any_selection()
+        self._refresh_stage_selector()
         self.update()
 
     def get_dm_token_snapshot(self) -> dict[str, Any]:
         tokens: list[dict[str, Any]] = []
-        for token in self.tokens_on_map:
+        self._commit_current_tier_state()
+        tier_names = {str(tier.get("id") or ""): str(tier.get("name") or tier.get("id") or "Stage") for tier in self._map_tiers}
+        for token in self._all_tier_tokens():
             token_id = token.get("id")
             if not isinstance(token_id, str) or not token_id:
                 continue
             footprint_w, footprint_h = self._get_token_footprint(token)
+            tier_id = str(token.get("tier_id") or self._active_tier_id)
             tokens.append(
                 {
                     "id": token_id,
@@ -2825,6 +3313,9 @@ class BattleMapWidget(QWidget):
                     "max_hp": token.get("max_hp"),
                     "initiative": token.get("initiative"),
                     "team_id": token.get("team_id"),
+                    "combat_participation": self.normalize_combat_participation(token.get("combat_participation")),
+                    "tier_id": tier_id,
+                    "tier_name": tier_names.get(tier_id, str(token.get("tier_name") or tier_id)),
                     "status": str(token.get("status", "alive")),
                     "ac": token.get("ac"),
                     "speed": token.get("speed"),
@@ -2913,7 +3404,7 @@ class BattleMapWidget(QWidget):
             self._team_count = normalized_team_count
             changed = True
 
-        for token_data in self.tokens_on_map:
+        for token_data in self._all_tier_tokens():
             token_id = token_data.get("id")
             if not isinstance(token_id, str) or not token_id:
                 continue
@@ -2936,10 +3427,147 @@ class BattleMapWidget(QWidget):
             "reassigned_count": reassigned_count,
         }
 
+    def set_token_combat_participation(self, token_id: str, participation: str) -> bool:
+        token, tier_id = self._find_token_by_id_any_tier(token_id)
+        if not token:
+            return False
+        new_value = self.normalize_combat_participation(participation)
+        if token.get("combat_participation") == new_value:
+            return False
+        token["combat_participation"] = new_value
+        token_name = self._clean_token_name(token.get("name", "Token"))
+        if new_value == COMBAT_PARTICIPATION_ACTIVE and self._combat_active and token.get("initiative") is None:
+            init_value, ok = QInputDialog.getInt(
+                self,
+                "Set Initiative",
+                f"Initiative for {token_name}:",
+                int(token.get("initiative_bonus", 0) or 0),
+                -100,
+                100,
+            )
+            if ok:
+                token["initiative"] = init_value
+        if self._combat_active:
+            self.rebuild_initiative_order(preserve_active_token=True)
+        self.logMessageGenerated.emit(
+            f"{token_name} is now {'Active' if new_value == COMBAT_PARTICIPATION_ACTIVE else 'Reserve'}."
+        )
+        self.tokenDataModified.emit()
+        self.update()
+        return True
+
+    def set_team_combat_participation(self, team_id: int, participation: str) -> int:
+        new_value = self.normalize_combat_participation(participation)
+        changed = 0
+        for token in self._all_tier_tokens():
+            try:
+                token_team_id = int(token.get("team_id"))
+            except (TypeError, ValueError):
+                continue
+            if token_team_id != int(team_id):
+                continue
+            if token.get("combat_participation") != new_value:
+                token["combat_participation"] = new_value
+                changed += 1
+        if changed:
+            if self._combat_active:
+                self.rebuild_initiative_order(preserve_active_token=True)
+            self.tokenDataModified.emit()
+            self.update()
+        return changed
+
+    def _next_open_tier_grid_position(self, occupied_positions: set[tuple[int, int]]) -> tuple[int, int]:
+        for y_pos in range(100):
+            for x_pos in range(100):
+                position = (x_pos, y_pos)
+                if position not in occupied_positions:
+                    occupied_positions.add(position)
+                    return position
+        fallback = (0, 0)
+        occupied_positions.add(fallback)
+        return fallback
+
+    def move_tokens_to_tier(self, token_ids: list[str], target_tier_id: str, set_reserve: bool = False) -> bool:
+        normalized_token_ids: list[str] = []
+        seen_token_ids: set[str] = set()
+        for token_id in token_ids:
+            if not isinstance(token_id, str) or not token_id or token_id in seen_token_ids:
+                continue
+            normalized_token_ids.append(token_id)
+            seen_token_ids.add(token_id)
+        if not normalized_token_ids:
+            return False
+        target_tier = next((tier for tier in self._map_tiers if tier.get("id") == target_tier_id), None)
+        if not isinstance(target_tier, dict):
+            return False
+        self._commit_current_tier_state()
+        tokens_to_move: list[dict[str, Any]] = []
+        token_ids_to_move: set[str] = set()
+        for token_id in normalized_token_ids:
+            token, _source_tier_id = self._find_token_by_id_any_tier(token_id)
+            if token:
+                tokens_to_move.append(token)
+                token_ids_to_move.add(token_id)
+        if not tokens_to_move:
+            return False
+        for tier in self._map_tiers:
+            tier_tokens = tier.get("tokens", [])
+            if isinstance(tier_tokens, list):
+                tier["tokens"] = [
+                    entry
+                    for entry in tier_tokens
+                    if not (isinstance(entry, dict) and entry.get("id") in token_ids_to_move)
+                ]
+        target_tokens = target_tier.setdefault("tokens", [])
+        if not isinstance(target_tokens, list):
+            target_tokens = []
+            target_tier["tokens"] = target_tokens
+        occupied_positions: set[tuple[int, int]] = set()
+        for entry in target_tokens:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                occupied_positions.add((int(entry.get("grid_x", 0)), int(entry.get("grid_y", 0))))
+            except (TypeError, ValueError):
+                continue
+        target_tier_name = str(target_tier.get("name") or target_tier_id)
+        for token in tokens_to_move:
+            token["tier_id"] = target_tier_id
+            token["tier_name"] = target_tier_name
+            token["grid_x"], token["grid_y"] = self._next_open_tier_grid_position(occupied_positions)
+            if set_reserve:
+                token["combat_participation"] = COMBAT_PARTICIPATION_RESERVE
+            target_tokens.append(token)
+        self._cancel_any_selection()
+        self._load_tier_into_view(target_tier_id)
+        moved_index = self._get_map_index_for_token_id(normalized_token_ids[0])
+        if moved_index is not None:
+            self._selected_token_index = moved_index
+        if self._combat_active:
+            self.rebuild_initiative_order(preserve_active_token=True)
+        self.tokenDataModified.emit()
+        self.update()
+        return True
+
+    def move_token_to_tier(self, token_id: str, target_tier_id: str, set_reserve: bool = False) -> bool:
+        return self.move_tokens_to_tier([token_id], target_tier_id, set_reserve)
+
+    def get_map_tier_options(self) -> list[dict[str, str]]:
+        return [
+            {"id": str(tier.get("id") or ""), "name": str(tier.get("name") or tier.get("id") or "Stage")}
+            for tier in self._map_tiers
+            if str(tier.get("id") or "")
+        ]
+
+    def get_current_tier_id(self) -> str:
+        return self._active_tier_id
+
     def _get_alive_tokens_missing_initiative(self) -> list[str]:
         missing_names: list[str] = []
-        for token in self.tokens_on_map:
+        for token in self._all_tier_tokens():
             if token.get("status", "alive") != "alive":
+                continue
+            if self.normalize_combat_participation(token.get("combat_participation")) != COMBAT_PARTICIPATION_ACTIVE:
                 continue
             if token.get("initiative") is None:
                 missing_names.append(self._clean_token_name(token.get("name", "Token")))
@@ -2947,8 +3575,10 @@ class BattleMapWidget(QWidget):
 
     def _all_alive_tokens_missing_initiative(self) -> bool:
         alive_count = 0
-        for token in self.tokens_on_map:
+        for token in self._all_tier_tokens():
             if token.get("status", "alive") != "alive":
+                continue
+            if self.normalize_combat_participation(token.get("combat_participation")) != COMBAT_PARTICIPATION_ACTIVE:
                 continue
             alive_count += 1
             if token.get("initiative") is not None:
@@ -2976,8 +3606,10 @@ class BattleMapWidget(QWidget):
 
         eligible_tokens = [
             token
-            for token in self.tokens_on_map
-            if token.get("status", "alive") == "alive" and token.get("initiative") is not None
+            for token in self._all_tier_tokens()
+            if token.get("status", "alive") == "alive"
+            and self.normalize_combat_participation(token.get("combat_participation")) == COMBAT_PARTICIPATION_ACTIVE
+            and token.get("initiative") is not None
         ]
         eligible_tokens.sort(
             key=lambda token: (
@@ -3023,7 +3655,7 @@ class BattleMapWidget(QWidget):
     ) -> dict[str, Any]:
         changed = False
         applied_count = 0
-        for token_data in self.tokens_on_map:
+        for token_data in self._all_tier_tokens():
             token_id = token_data.get("id")
             if not isinstance(token_id, str) or token_id not in values_by_token_id:
                 continue
@@ -3060,8 +3692,10 @@ class BattleMapWidget(QWidget):
         elif start_if_ready and not missing_alive_tokens:
             ready_tokens = [
                 token
-                for token in self.tokens_on_map
-                if token.get("status", "alive") == "alive" and token.get("initiative") is not None
+                for token in self._all_tier_tokens()
+                if token.get("status", "alive") == "alive"
+                and self.normalize_combat_participation(token.get("combat_participation")) == COMBAT_PARTICIPATION_ACTIVE
+                and token.get("initiative") is not None
             ]
             if ready_tokens:
                 self._combat_active = True
@@ -3263,6 +3897,11 @@ class BattleMapWidget(QWidget):
     def select_token_by_id(self, token_id: str) -> bool:
         token_index = self._get_map_index_for_token_id(token_id)
         if token_index is None:
+            _, tier_id = self._find_token_by_id_any_tier(token_id)
+            if tier_id and tier_id != self._active_tier_id:
+                self.switch_to_tier(tier_id)
+                token_index = self._get_map_index_for_token_id(token_id)
+        if token_index is None:
             return False
         self._selected_token_index = token_index
         self.update()
@@ -3270,6 +3909,11 @@ class BattleMapWidget(QWidget):
 
     def edit_token_profile_by_id(self, token_id: str) -> bool:
         token_index = self._get_map_index_for_token_id(token_id)
+        if token_index is None:
+            _, tier_id = self._find_token_by_id_any_tier(token_id)
+            if tier_id and tier_id != self._active_tier_id:
+                self.switch_to_tier(tier_id)
+                token_index = self._get_map_index_for_token_id(token_id)
         if token_index is None:
             return False
         self._selected_token_index = token_index
@@ -3715,6 +4359,9 @@ class BattleMapWidget(QWidget):
             'rotation_quarters': 0,
             'visual_fit_mode': visual_fit_mode,
             'initiative': initiative_value,
+            'combat_participation': COMBAT_PARTICIPATION_RESERVE if self._combat_active else COMBAT_PARTICIPATION_ACTIVE,
+            'tier_id': self._active_tier_id,
+            'tier_name': str(self._active_tier().get("name") or self._active_tier_id),
             'oa_reaction_used_round': None,
             'readied_reaction_armed': False,
             'status': initial_status,
@@ -4305,6 +4952,24 @@ class BattleMapWidget(QWidget):
             )
             status_menu.addAction(incapacitated_act)
 
+            participation_menu = menu.addMenu("Combat Participation")
+            self._apply_context_menu_style(participation_menu)
+            current_participation = self.normalize_combat_participation(token_data.get("combat_participation"))
+            active_participation_act = QAction("Active", self)
+            active_participation_act.setCheckable(True)
+            active_participation_act.setChecked(current_participation == COMBAT_PARTICIPATION_ACTIVE)
+            active_participation_act.triggered.connect(
+                partial(self.set_token_combat_participation, str(token_data.get("id", "")), COMBAT_PARTICIPATION_ACTIVE)
+            )
+            reserve_participation_act = QAction("Reserve", self)
+            reserve_participation_act.setCheckable(True)
+            reserve_participation_act.setChecked(current_participation == COMBAT_PARTICIPATION_RESERVE)
+            reserve_participation_act.triggered.connect(
+                partial(self.set_token_combat_participation, str(token_data.get("id", "")), COMBAT_PARTICIPATION_RESERVE)
+            )
+            participation_menu.addAction(active_participation_act)
+            participation_menu.addAction(reserve_participation_act)
+
             if current_status == "unconscious":
                 ds_menu = menu.addMenu("Death Saves")
                 self._apply_context_menu_style(ds_menu)
@@ -4635,11 +5300,16 @@ class BattleMapWidget(QWidget):
                     self.logMessageGenerated.emit(f"⏳ ROUND {self._current_round} BEGINS! ⏳")
                 self._selected_token_index = self._get_map_index_for_token_id(current_token_in_order.get('id'))
                 if self._selected_token_index is None: 
-                    print(f"ERROR: Could not find token in tokens_on_map for ID {current_token_in_order.get('id')}")
-                    missing_name = self._clean_token_name(current_token_in_order.get('name', 'Unknown'))
-                    self.logMessageGenerated.emit(f"Error: Active token {missing_name} not found on map.")
-                    self._request_end_combat() 
-                    return
+                    _, token_tier_id = self._find_token_by_id_any_tier(current_token_in_order.get('id'))
+                    if token_tier_id and token_tier_id != self._active_tier_id:
+                        self.switch_to_tier(token_tier_id)
+                        self._selected_token_index = self._get_map_index_for_token_id(current_token_in_order.get('id'))
+                    if self._selected_token_index is None:
+                        print(f"ERROR: Could not find token in map tiers for ID {current_token_in_order.get('id')}")
+                        missing_name = self._clean_token_name(current_token_in_order.get('name', 'Unknown'))
+                        self.logMessageGenerated.emit(f"Error: Active token {missing_name} not found on map.")
+                        self._request_end_combat()
+                        return
                 active_token_id = current_token_in_order.get("id")
                 if isinstance(active_token_id, str):
                     self._start_active_turn_indicator(active_token_id)
@@ -4681,6 +5351,12 @@ class BattleMapWidget(QWidget):
                 self.encounterEnded.emit() 
                 event.accept()
             else: event.ignore()
+        elif key == Qt.Key.Key_BracketLeft and not self._is_in_any_selection_mode() and not self.is_animating_move:
+            self.switch_relative_tier(-1)
+            event.accept()
+        elif key == Qt.Key.Key_BracketRight and not self._is_in_any_selection_mode() and not self.is_animating_move:
+            self.switch_relative_tier(1)
+            event.accept()
         elif key == Qt.Key.Key_N and not self._is_in_any_selection_mode() and not self.is_animating_move and not self._generated_token_placement_request:
             self.advance_turn()
             event.accept()

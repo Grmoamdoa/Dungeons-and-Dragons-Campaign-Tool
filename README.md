@@ -9,6 +9,9 @@ Current MVP status:
 - Presentation mode with operator controls + player-facing output
 - Encounter runtime state persistence
 - Computer-wide configurable hotkeys for top-level menu commands
+- Encounter setup supports multi-stage maps with per-stage tokens and fog/cloud squares
+- DM control panel supports multi-select token moves and reserve/active updates
+- DM control panel token list expands up to 10 visible encounter tokens before scrolling
 
 ## Install Packaged App
 
@@ -298,6 +301,8 @@ pip install -r requirements.txt
 3. Place both on the timeline and press Play.
 4. Save project as `.dcp`.
 5. Reload that `.dcp` and confirm clips still work.
+6. If the first timeline scene is an encounter, press Play after reload and confirm its tokens appear without reopening Encounter Setup.
+7. For a multi-stage encounter, confirm stage maps, tokens, and fog/cloud squares survive save/load and player-view rendering.
 
 ## Known-Good Baseline
 

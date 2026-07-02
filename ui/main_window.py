@@ -15,7 +15,8 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QMenuBar, QApplication, QSizePolicy, QMessageBox,
     QPushButton, QFileDialog, QInputDialog,
-    QStackedWidget, QDialog, QStatusBar, QLineEdit, QFormLayout # Added QLineEdit, QFormLayout
+    QStackedWidget, QDialog, QStatusBar, QLineEdit, QFormLayout,
+    QDialogButtonBox, QListWidget, QListWidgetItem, QCheckBox
 )
 from PyQt6.QtGui import (
     QAction,
@@ -79,7 +80,9 @@ class MainWindow(QMainWindow):
         self.toggle_presentation_action: Union[QAction, None] = None
         self.open_dm_panel_action: Union[QAction, None] = None
         self.manage_initiative_action: Union[QAction, None] = None
+        self.player_battle_follow_dm_stage_action: Union[QAction, None] = None
         self.player_battle_follow_dm_camera_action: Union[QAction, None] = None
+        self.player_battle_follow_dm_zoom_action: Union[QAction, None] = None
         self.player_battle_preserve_aspect_action: Union[QAction, None] = None
         self.user_manual_action: Union[QAction, None] = None
         self.feedback_notes_action: Union[QAction, None] = None
@@ -143,6 +146,9 @@ class MainWindow(QMainWindow):
         self._slot_exception_dialog_active = False
         self.dm_runtime_state: dict[str, Any] = {"clip_overrides": {}, "skip_ranges": [], "meta": {}}
         self.player_battle_follow_dm_camera = True
+        self.player_battle_follow_dm_zoom = False
+        self.player_battle_follow_dm_stage = True
+        self.player_battle_locked_stage_id: Union[str, None] = None
         self.player_battle_preserve_aspect = True
         self._hotkey_settings = QSettings("D&D Campaign Presenter", "D&D Campaign Presenter")
         self._movement_count_mode = self._normalize_movement_count_mode(
@@ -491,6 +497,20 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.manage_initiative_action)
         self._register_hotkey_action("view.manage_initiative", "View", self.manage_initiative_action)
         view_menu.addSeparator()
+        self.player_battle_follow_dm_stage_action = QAction("Player Battle: Follow DM Stage", self)
+        self.player_battle_follow_dm_stage_action.setCheckable(True)
+        self.player_battle_follow_dm_stage_action.setChecked(self.player_battle_follow_dm_stage)
+        self._connect_safe(
+            self.player_battle_follow_dm_stage_action.toggled,
+            self._handle_player_battle_follow_dm_stage_toggled,
+            "_handle_player_battle_follow_dm_stage_toggled",
+        )
+        view_menu.addAction(self.player_battle_follow_dm_stage_action)
+        self._register_hotkey_action(
+            "view.player_battle_follow_dm_stage",
+            "View",
+            self.player_battle_follow_dm_stage_action,
+        )
         self.player_battle_follow_dm_camera_action = QAction("Player Battle: Follow DM Camera", self)
         self.player_battle_follow_dm_camera_action.setCheckable(True)
         self.player_battle_follow_dm_camera_action.setChecked(self.player_battle_follow_dm_camera)
@@ -504,6 +524,20 @@ class MainWindow(QMainWindow):
             "view.player_battle_follow_dm_camera",
             "View",
             self.player_battle_follow_dm_camera_action,
+        )
+        self.player_battle_follow_dm_zoom_action = QAction("Player Battle: Follow DM Zoom", self)
+        self.player_battle_follow_dm_zoom_action.setCheckable(True)
+        self.player_battle_follow_dm_zoom_action.setChecked(self.player_battle_follow_dm_zoom)
+        self._connect_safe(
+            self.player_battle_follow_dm_zoom_action.toggled,
+            self._handle_player_battle_follow_dm_zoom_toggled,
+            "_handle_player_battle_follow_dm_zoom_toggled",
+        )
+        view_menu.addAction(self.player_battle_follow_dm_zoom_action)
+        self._register_hotkey_action(
+            "view.player_battle_follow_dm_zoom",
+            "View",
+            self.player_battle_follow_dm_zoom_action,
         )
         self.player_battle_preserve_aspect_action = QAction("Player Battle: Preserve Aspect Ratio", self)
         self.player_battle_preserve_aspect_action.setCheckable(True)
@@ -771,6 +805,16 @@ class MainWindow(QMainWindow):
                 self.dm_control_panel.battleTokenSelectionChanged,
                 self._handle_dm_battle_token_selection_changed,
                 "_handle_dm_battle_token_selection_changed",
+            )
+            self._connect_safe(
+                self.dm_control_panel.battleTokenParticipationChanged,
+                self._handle_dm_battle_token_participation_changed,
+                "_handle_dm_battle_token_participation_changed",
+            )
+            self._connect_safe(
+                self.dm_control_panel.battleTokenMoveStageRequested,
+                self._handle_dm_battle_token_move_stage_requested,
+                "_handle_dm_battle_token_move_stage_requested",
             )
             self._connect_safe(
                 self.dm_control_panel.initiativeManagerRequested,
@@ -1296,8 +1340,72 @@ class MainWindow(QMainWindow):
     def _handle_dm_battle_token_selection_changed(self, token_id: str):
         if not self.battle_map_widget or not isinstance(token_id, str) or not token_id:
             return
-        if self.battle_map_widget.select_token_by_id(token_id):
+        self.battle_map_widget.select_token_by_id(token_id)
+
+    @pyqtSlot(list, str)
+    def _handle_dm_battle_token_participation_changed(self, token_ids: list, participation: str):
+        if not self.battle_map_widget:
+            return
+        normalized_token_ids = [
+            token_id
+            for token_id in token_ids
+            if isinstance(token_id, str) and token_id
+        ]
+        if not normalized_token_ids:
+            return
+        changed = False
+        for token_id in normalized_token_ids:
+            changed = self.battle_map_widget.set_token_combat_participation(token_id, participation) or changed
+        if changed:
             self._sync_dm_panel_from_timeline()
+            self._request_player_battle_snapshot_refresh()
+
+    @pyqtSlot(list)
+    def _handle_dm_battle_token_move_stage_requested(self, token_ids: list):
+        if not self.battle_map_widget:
+            return
+        normalized_token_ids = [
+            token_id
+            for token_id in token_ids
+            if isinstance(token_id, str) and token_id
+        ]
+        if not normalized_token_ids:
+            return
+        tiers = self.battle_map_widget.get_map_tier_options()
+        if len(tiers) <= 1:
+            QMessageBox.information(self, "Move to Stage", "This encounter only has one stage.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Move Tokens to Stage" if len(normalized_token_ids) > 1 else "Move Token to Stage")
+        layout = QVBoxLayout(dialog)
+        if len(normalized_token_ids) > 1:
+            layout.addWidget(QLabel(f"Move {len(normalized_token_ids)} selected tokens to:"))
+        stage_list = QListWidget(dialog)
+        for tier in tiers:
+            item = QListWidgetItem(tier.get("name", "Stage"))
+            item.setData(Qt.ItemDataRole.UserRole, tier.get("id"))
+            stage_list.addItem(item)
+        if stage_list.count() > 0:
+            stage_list.setCurrentRow(0)
+        reserve_checkbox = QCheckBox("Set to Reserve after moving", dialog)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(stage_list)
+        layout.addWidget(reserve_checkbox)
+        layout.addWidget(buttons)
+        if not dialog.exec():
+            return
+        selected_item = stage_list.currentItem()
+        target_tier_id = selected_item.data(Qt.ItemDataRole.UserRole) if selected_item else None
+        if isinstance(target_tier_id, str) and target_tier_id:
+            if self.battle_map_widget.move_tokens_to_tier(
+                normalized_token_ids,
+                target_tier_id,
+                reserve_checkbox.isChecked(),
+            ):
+                self._sync_dm_panel_from_timeline()
+                self._request_player_battle_snapshot_refresh()
 
     @pyqtSlot(str)
     def _handle_dm_movement_count_mode_changed(self, mode: str):
@@ -1430,8 +1538,27 @@ class MainWindow(QMainWindow):
             return
 
         target_size = self.player_view_window.get_render_size()
-        if self.player_battle_follow_dm_camera:
+        if not self.player_battle_follow_dm_stage:
+            if not self.player_battle_locked_stage_id and hasattr(self.battle_map_widget, "get_current_tier_id"):
+                self.player_battle_locked_stage_id = self.battle_map_widget.get_current_tier_id()
+            if self.player_battle_locked_stage_id and hasattr(self.battle_map_widget, "render_player_stage_frame"):
+                snapshot = self.battle_map_widget.render_player_stage_frame(
+                    self.player_battle_locked_stage_id,
+                    target_size,
+                    preserve_aspect=bool(self.player_battle_preserve_aspect),
+                )
+            else:
+                snapshot = self.battle_map_widget.render_player_cinematic_frame(
+                    target_size,
+                    preserve_aspect=bool(self.player_battle_preserve_aspect),
+                )
+        elif self.player_battle_follow_dm_camera:
             snapshot = self.battle_map_widget.render_player_follow_camera_frame(
+                target_size,
+                fallback_preserve_aspect=bool(self.player_battle_preserve_aspect),
+            )
+        elif self.player_battle_follow_dm_zoom:
+            snapshot = self.battle_map_widget.render_player_follow_zoom_frame(
                 target_size,
                 fallback_preserve_aspect=bool(self.player_battle_preserve_aspect),
             )
@@ -1448,6 +1575,20 @@ class MainWindow(QMainWindow):
     @pyqtSlot(bool)
     def _handle_player_battle_follow_dm_camera_toggled(self, checked: bool):
         self.player_battle_follow_dm_camera = bool(checked)
+        self._refresh_player_view_for_current_mode()
+
+    @pyqtSlot(bool)
+    def _handle_player_battle_follow_dm_zoom_toggled(self, checked: bool):
+        self.player_battle_follow_dm_zoom = bool(checked)
+        self._refresh_player_view_for_current_mode()
+
+    @pyqtSlot(bool)
+    def _handle_player_battle_follow_dm_stage_toggled(self, checked: bool):
+        self.player_battle_follow_dm_stage = bool(checked)
+        if checked:
+            self.player_battle_locked_stage_id = None
+        elif self.battle_map_widget and hasattr(self.battle_map_widget, "get_current_tier_id"):
+            self.player_battle_locked_stage_id = self.battle_map_widget.get_current_tier_id()
         self._refresh_player_view_for_current_mode()
 
     @pyqtSlot(bool)
@@ -1540,6 +1681,109 @@ class MainWindow(QMainWindow):
                     changes_applied += 1
 
         return changes_applied
+
+    def _repair_loaded_project_asset_references(self, project_data: dict[str, Any]) -> int:
+        if not self.asset_bin or not isinstance(project_data, dict):
+            return 0
+
+        assets_by_category = self.asset_bin.get_assets_data_for_save()
+        if not isinstance(assets_by_category, dict):
+            return 0
+
+        basename_indexes: dict[str, dict[str, str | None]] = {}
+        for category, paths in assets_by_category.items():
+            if not isinstance(category, str) or not isinstance(paths, list):
+                continue
+            category_index: dict[str, str | None] = {}
+            for asset_path in paths:
+                if not isinstance(asset_path, str) or not asset_path:
+                    continue
+                basename_key = os.path.basename(asset_path).casefold()
+                if not basename_key:
+                    continue
+                if basename_key in category_index and category_index[basename_key] != asset_path:
+                    category_index[basename_key] = None
+                else:
+                    category_index[basename_key] = asset_path
+            basename_indexes[category] = category_index
+
+        def repaired_path(raw_path: Any, category: str) -> Any:
+            if not isinstance(raw_path, str) or not raw_path:
+                return raw_path
+            if os.path.exists(raw_path):
+                return raw_path
+            replacement = basename_indexes.get(category, {}).get(os.path.basename(raw_path).casefold())
+            return replacement if replacement else raw_path
+
+        repaired_count = 0
+
+        def repair_field(container: dict[str, Any], field_name: str, category: str) -> None:
+            nonlocal repaired_count
+            old_path = container.get(field_name)
+            new_path = repaired_path(old_path, category)
+            if new_path != old_path:
+                container[field_name] = new_path
+                repaired_count += 1
+
+        def repair_tokens(tokens: Any) -> None:
+            if not isinstance(tokens, list):
+                return
+            for token in tokens:
+                if not isinstance(token, dict):
+                    continue
+                repair_field(token, "path", "tokens")
+                repair_field(token, "skin_path", "tokens")
+
+        def repair_encounter_container(container: Any) -> None:
+            if not isinstance(container, dict):
+                return
+            repair_field(container, "map_path", "images")
+            repair_field(container, "battle_music_path", "audio")
+            repair_tokens(container.get("tokens"))
+            map_tiers = container.get("map_tiers")
+            if isinstance(map_tiers, list):
+                for tier in map_tiers:
+                    if not isinstance(tier, dict):
+                        continue
+                    repair_field(tier, "map_path", "images")
+                    repair_tokens(tier.get("tokens"))
+
+        timeline_data = project_data.get("timeline", [])
+        if isinstance(timeline_data, list):
+            for clip_data in timeline_data:
+                if not isinstance(clip_data, dict):
+                    continue
+                track = clip_data.get("track")
+                if track == "Battle":
+                    repair_encounter_container(clip_data)
+                elif track == "Image":
+                    repair_field(clip_data, "path", "images")
+                elif track == "Audio":
+                    repair_field(clip_data, "path", "audio")
+
+        encounter_runtime = project_data.get("encounter_runtime", {})
+        if isinstance(encounter_runtime, dict):
+            for runtime_state in encounter_runtime.values():
+                repair_encounter_container(runtime_state)
+
+        token_profiles = project_data.get("token_profiles", {})
+        if isinstance(token_profiles, dict):
+            repaired_profiles: dict[str, Any] = {}
+            for profile_path, profile_data in token_profiles.items():
+                new_profile_path = repaired_path(profile_path, "tokens")
+                if new_profile_path != profile_path:
+                    repaired_count += 1
+                if new_profile_path in repaired_profiles and isinstance(profile_data, dict):
+                    existing_profile = repaired_profiles.get(new_profile_path)
+                    if isinstance(existing_profile, dict):
+                        existing_profile.update(profile_data)
+                    else:
+                        repaired_profiles[new_profile_path] = profile_data
+                else:
+                    repaired_profiles[new_profile_path] = profile_data
+            project_data["token_profiles"] = repaired_profiles
+
+        return repaired_count
 
     @pyqtSlot()
     def _handle_assets_modified(self):
@@ -2038,39 +2282,14 @@ class MainWindow(QMainWindow):
         profile_name = ensure_profile_name(profile, profile_path)
         changed = False
 
-        if self.timeline_editor:
-            for clip_data in self.timeline_editor.timeline_clips:
-                if not isinstance(clip_data, dict) or clip_data.get("track") != "Battle":
-                    continue
-                raw_tokens = clip_data.get("tokens", [])
-                if not isinstance(raw_tokens, list):
-                    continue
-                for raw_token in raw_tokens:
-                    if not isinstance(raw_token, dict) or raw_token.get("path") != profile_path:
-                        continue
-                    if raw_token.get("footprint_w") != footprint_w:
-                        raw_token["footprint_w"] = footprint_w
-                        changed = True
-                    if raw_token.get("footprint_h") != footprint_h:
-                        raw_token["footprint_h"] = footprint_h
-                        changed = True
-                    normalized_token_fit_mode = normalize_visual_fit_mode(
-                        raw_token.get("visual_fit_mode", DEFAULT_TOKEN_VISUAL_FIT_MODE)
-                    )
-                    if normalized_token_fit_mode != visual_fit_mode:
-                        raw_token["visual_fit_mode"] = visual_fit_mode
-                        changed = True
-
-        for runtime_state in self.encounter_runtime_by_clip_id.values():
-            if not isinstance(runtime_state, dict):
-                continue
-            raw_tokens = runtime_state.get("tokens", [])
+        def sync_authored_tokens(raw_tokens: Any, include_name: bool = False) -> None:
+            nonlocal changed
             if not isinstance(raw_tokens, list):
-                continue
+                return
             for raw_token in raw_tokens:
                 if not isinstance(raw_token, dict) or raw_token.get("path") != profile_path:
                     continue
-                if raw_token.get("name") != profile_name:
+                if include_name and raw_token.get("name") != profile_name:
                     raw_token["name"] = profile_name
                     changed = True
                 if raw_token.get("footprint_w") != footprint_w:
@@ -2085,6 +2304,29 @@ class MainWindow(QMainWindow):
                 if normalized_token_fit_mode != visual_fit_mode:
                     raw_token["visual_fit_mode"] = visual_fit_mode
                     changed = True
+
+        if self.timeline_editor:
+            for clip_data in self.timeline_editor.timeline_clips:
+                if not isinstance(clip_data, dict) or clip_data.get("track") != "Battle":
+                    continue
+                sync_authored_tokens(clip_data.get("tokens"))
+                map_tiers = clip_data.get("map_tiers")
+                if isinstance(map_tiers, list):
+                    for tier in map_tiers:
+                        if not isinstance(tier, dict):
+                            continue
+                        sync_authored_tokens(tier.get("tokens"))
+
+        for runtime_state in self.encounter_runtime_by_clip_id.values():
+            if not isinstance(runtime_state, dict):
+                continue
+            sync_authored_tokens(runtime_state.get("tokens"), include_name=True)
+            map_tiers = runtime_state.get("map_tiers")
+            if isinstance(map_tiers, list):
+                for tier in map_tiers:
+                    if not isinstance(tier, dict):
+                        continue
+                    sync_authored_tokens(tier.get("tokens"), include_name=True)
 
         return changed
 
@@ -2264,13 +2506,17 @@ class MainWindow(QMainWindow):
                 self.timeline_editor.clear_timeline()
                 self.token_profiles.clear()
                 
-                loaded_profiles = project_data.get("token_profiles", {})
-                self.token_profiles.update(self._migrate_token_profiles(loaded_profiles))
-                print(f"Loaded {len(self.token_profiles)} token profiles.")
-                
                 print("Loading assets...")
                 assets_data = project_data.get("assets", {})
                 self.asset_bin.load_assets_from_data(assets_data)
+                repaired_refs = self._repair_loaded_project_asset_references(project_data)
+                if repaired_refs > 0:
+                    print(f"Repaired {repaired_refs} loaded project asset reference(s).")
+
+                loaded_profiles = project_data.get("token_profiles", {})
+                self.token_profiles.update(self._migrate_token_profiles(loaded_profiles))
+                print(f"Loaded {len(self.token_profiles)} token profiles.")
+
                 self._ensure_token_profiles_for_assets()
                 print("Assets loaded.")
                 

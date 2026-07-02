@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QWidget, QSpinBox, QCheckBox, QFileDialog,
     QDialogButtonBox, QApplication, QSizePolicy,
     QListWidget, QListWidgetItem, QMenu, QMessageBox, QSpacerItem, QStyle,
-    QScrollArea, QComboBox, QColorDialog
+    QScrollArea, QComboBox, QColorDialog, QLineEdit
 )
 from PyQt6.QtGui import (
     QPixmap, QPainter, QPen, QColor, QPaintEvent, QIcon, QDrag, QMouseEvent,
@@ -34,6 +34,10 @@ PREVIEW_ZOOM_FACTOR = 1.15
 DEFAULT_PROFILE_TOKEN_SIZE_SQUARES = 1
 MAX_PROFILE_TOKEN_SIZE_SQUARES = 10
 MAP_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+DEFAULT_TIER_ID = "tier_1"
+MAX_MAP_TIERS = 12
+COMBAT_PARTICIPATION_ACTIVE = "active"
+COMBAT_PARTICIPATION_RESERVE = "reserve"
 
 try:
     MAX_GRID_OFFSET = 500 
@@ -182,16 +186,21 @@ class MapImageDropField(QWidget):
         self.setToolTip("Drop a map image here or browse for one.")
         self.setStyleSheet(self._base_style)
 
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
+        drop_status_layout = QHBoxLayout()
+        drop_status_layout.setContentsMargins(0, 0, 0, 0)
+        drop_status_layout.setSpacing(8)
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(2)
         text_layout.addWidget(self._drop_hint)
         text_layout.addWidget(self._label)
-        layout.addWidget(self._drop_icon)
-        layout.addLayout(text_layout, 1)
+        drop_status_layout.addWidget(self._drop_icon)
+        drop_status_layout.addLayout(text_layout, 1)
+        layout.addLayout(drop_status_layout)
+        self._browse_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout.addWidget(self._browse_button)
 
     def _first_supported_local_file(self, event) -> str:
@@ -236,6 +245,104 @@ class MapImageDropField(QWidget):
 
     def dropEvent(self, event: QDropEvent):
         self.setStyleSheet(self._base_style)
+        path = self._first_supported_local_file(event)
+        if path:
+            self.mapDropped.emit(path)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
+class TierMapDropField(QWidget):
+    mapDropped = pyqtSignal(str)
+    selected = pyqtSignal()
+
+    def __init__(self, tier_id: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.tier_id = tier_id
+        self._selected = False
+        self._map_path = ""
+        self.setAcceptDrops(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._base_style = (
+            "QWidget#TierMapDropField { border: 1px dashed #707070; border-radius: 4px; "
+            "background-color: rgba(255, 255, 255, 0.03); }"
+        )
+        self._hover_style = (
+            "QWidget#TierMapDropField { border: 1px dashed #8FC7FF; border-radius: 4px; "
+            "background-color: rgba(143, 199, 255, 0.12); }"
+        )
+        self._selected_style = (
+            "QWidget#TierMapDropField { border: 2px solid #4da3ff; border-radius: 4px; "
+            "background-color: rgba(77, 163, 255, 0.16); }"
+        )
+        self.setObjectName("TierMapDropField")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        self._label = QLabel("Drop map or import")
+        self._label.setWordWrap(True)
+        layout.addWidget(self._label)
+        self._refresh_style()
+
+    def setSelected(self, selected: bool):
+        self._selected = bool(selected)
+        self._refresh_style()
+
+    def setMapPath(self, path: str):
+        self._map_path = path if isinstance(path, str) else ""
+        if self._map_path:
+            name = os.path.basename(self._map_path)
+            self._label.setText(name if len(name) <= 32 else f"...{name[-29:]}")
+            self.setToolTip(self._map_path)
+        else:
+            self._label.setText("Drop map or import")
+            self.setToolTip("")
+
+    def _refresh_style(self):
+        self.setStyleSheet(self._selected_style if self._selected else self._base_style)
+
+    def _first_supported_local_file(self, event) -> str:
+        mime_data = event.mimeData()
+        if mime_data.hasFormat(ASSET_PATH_MIME_TYPE):
+            try:
+                asset_path = bytes(mime_data.data(ASSET_PATH_MIME_TYPE)).decode('utf-8')
+            except UnicodeDecodeError:
+                asset_path = ""
+            if asset_path and os.path.isfile(asset_path) and os.path.splitext(asset_path)[1].lower() in MAP_IMAGE_EXTENSIONS:
+                return asset_path
+        if mime_data.hasUrls():
+            for url in mime_data.urls():
+                path = url.toLocalFile()
+                if path and os.path.isfile(path) and os.path.splitext(path)[1].lower() in MAP_IMAGE_EXTENSIONS:
+                    return path
+        return ""
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.selected.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if self._first_supported_local_file(event):
+            event.acceptProposedAction()
+            self.setStyleSheet(self._hover_style)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent):
+        if self._first_supported_local_file(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent):
+        self._refresh_style()
+        event.accept()
+
+    def dropEvent(self, event: QDropEvent):
+        self._refresh_style()
         path = self._first_supported_local_file(event)
         if path:
             self.mapDropped.emit(path)
@@ -980,6 +1087,80 @@ class MapPreviewLabel(QLabel):
 # Assume the rest of EncounterSetupDialog (methods like _browse_map, get_settings, etc.) is as before.
 
 class EncounterSetupDialog(QDialog):
+    def _default_tier_from_settings(self, settings: Dict) -> Dict:
+        return {
+            "id": DEFAULT_TIER_ID,
+            "name": "Stage 1",
+            "map_path": str(settings.get("map_path", DEFAULT_MAP_PATH or "")),
+            "show_grid": bool(settings.get("show_grid", True)),
+            "grid_size": int(settings.get("grid_size", 50)),
+            "grid_offset_x": int(settings.get("grid_offset_x", 0)),
+            "grid_offset_y": int(settings.get("grid_offset_y", 0)),
+            "tokens": self._normalize_setup_tokens(settings.get("tokens", [])),
+            "fog_squares": self._normalize_setup_fog(settings.get("fog_squares", [])),
+        }
+
+    def _normalize_setup_fog(self, raw_fog) -> List[Dict[str, Union[str, int]]]:
+        if BattleMapWidget is not None:
+            return BattleMapWidget.serialize_fog_squares(BattleMapWidget.normalize_fog_squares(raw_fog))
+        if isinstance(raw_fog, list):
+            return [dict(entry) for entry in raw_fog if isinstance(entry, dict)]
+        return []
+
+    def _normalize_setup_tokens(self, raw_tokens) -> List[Dict[str, Union[str, int]]]:
+        normalized: List[Dict[str, Union[str, int]]] = []
+        if not isinstance(raw_tokens, list):
+            return normalized
+        for token_data in raw_tokens:
+            if not isinstance(token_data, dict):
+                continue
+            if not isinstance(token_data.get('path'), str):
+                continue
+            try:
+                grid_x = int(token_data.get('grid_x'))
+                grid_y = int(token_data.get('grid_y'))
+            except (TypeError, ValueError):
+                continue
+            token_copy = token_data.copy()
+            token_copy['grid_x'] = grid_x
+            token_copy['grid_y'] = grid_y
+            token_copy['footprint_w'], token_copy['footprint_h'] = get_footprint_dimensions(token_copy)
+            token_copy['visual_fit_mode'] = normalize_visual_fit_mode(
+                token_copy.get('visual_fit_mode', DEFAULT_TOKEN_VISUAL_FIT_MODE)
+            )
+            token_copy['combat_participation'] = self._normalize_combat_participation(
+                token_copy.get('combat_participation', COMBAT_PARTICIPATION_ACTIVE)
+            )
+            normalized.append(token_copy)
+        return normalized
+
+    def _normalize_combat_participation(self, raw_value) -> str:
+        value = str(raw_value or COMBAT_PARTICIPATION_ACTIVE).strip().lower()
+        return COMBAT_PARTICIPATION_RESERVE if value == COMBAT_PARTICIPATION_RESERVE else COMBAT_PARTICIPATION_ACTIVE
+
+    def _normalize_map_tiers_from_settings(self, settings: Dict) -> List[Dict]:
+        raw_tiers = settings.get("map_tiers", [])
+        tiers: List[Dict] = []
+        if isinstance(raw_tiers, list):
+            for index, raw_tier in enumerate(raw_tiers):
+                if not isinstance(raw_tier, dict):
+                    continue
+                tier_id = str(raw_tier.get("id") or f"tier_{index + 1}")
+                tiers.append({
+                    "id": tier_id,
+                    "name": str(raw_tier.get("name") or f"Stage {index + 1}"),
+                    "map_path": str(raw_tier.get("map_path", "")),
+                    "show_grid": bool(raw_tier.get("show_grid", True)),
+                    "grid_size": int(raw_tier.get("grid_size", 50)),
+                    "grid_offset_x": int(raw_tier.get("grid_offset_x", 0)),
+                    "grid_offset_y": int(raw_tier.get("grid_offset_y", 0)),
+                    "tokens": self._normalize_setup_tokens(raw_tier.get("tokens", [])),
+                    "fog_squares": self._normalize_setup_fog(raw_tier.get("fog_squares", [])),
+                })
+        if not tiers:
+            tiers = [self._default_tier_from_settings(settings)]
+        return tiers[:MAX_MAP_TIERS]
+
     def __init__(self, 
                  available_token_paths: List[str], 
                  asset_bin_ref: Optional[AssetBinWidget] = None, 
@@ -996,40 +1177,27 @@ class EncounterSetupDialog(QDialog):
         self._available_token_paths = list(available_token_paths)
         
         settings = initial_settings if initial_settings is not None else {}
-        self._map_path: str = settings.get("map_path", DEFAULT_MAP_PATH or "")
+        self._map_tiers: List[Dict] = self._normalize_map_tiers_from_settings(settings)
+        self._active_tier_id: str = str(settings.get("active_tier_id") or self._map_tiers[0]["id"])
+        if not any(tier.get("id") == self._active_tier_id for tier in self._map_tiers):
+            self._active_tier_id = self._map_tiers[0]["id"]
+        self._tier_row_widgets: Dict[str, Dict[str, QWidget]] = {}
+        active_tier = self._get_active_tier_data()
+        self._map_path: str = active_tier.get("map_path", DEFAULT_MAP_PATH or "")
         self._battle_music_path: Optional[str] = settings.get("battle_music_path", None)
         try:
             self._battle_music_volume = max(0.0, min(1.0, float(settings.get("battle_music_volume", 1.0))))
         except (TypeError, ValueError):
             self._battle_music_volume = 1.0
         self._battle_music_loop: bool = bool(settings.get("battle_music_loop", True))
-        self._show_grid: bool = settings.get("show_grid", True)
-        self._grid_size: int = settings.get("grid_size", 50)
-        self._grid_offset_x: int = settings.get("grid_offset_x", 0)
-        self._grid_offset_y: int = settings.get("grid_offset_y", 0)
+        self._show_grid: bool = active_tier.get("show_grid", True)
+        self._grid_size: int = active_tier.get("grid_size", 50)
+        self._grid_offset_x: int = active_tier.get("grid_offset_x", 0)
+        self._grid_offset_y: int = active_tier.get("grid_offset_y", 0)
         self._fog_mode: str = DEFAULT_FOG_MODE
         self._fog_color: str = DEFAULT_FOG_COLOR
-        self._fog_squares: List[Dict[str, Union[str, int]]] = []
-        if BattleMapWidget is not None:
-            self._fog_squares = BattleMapWidget.serialize_fog_squares(
-                BattleMapWidget.normalize_fog_squares(settings.get("fog_squares", []))
-            )
-        elif isinstance(settings.get("fog_squares", []), list):
-            self._fog_squares = [dict(entry) for entry in settings.get("fog_squares", []) if isinstance(entry, dict)]
-        self._placed_tokens: List[Dict[str, Union[str, int]]] = []
-        raw_tokens = settings.get("tokens", [])
-        if isinstance(raw_tokens, list):
-            for token_data in raw_tokens:
-                if isinstance(token_data, dict) and \
-                   'path' in token_data and isinstance(token_data['path'], str) and \
-                   'grid_x' in token_data and isinstance(token_data['grid_x'], int) and \
-                   'grid_y' in token_data and isinstance(token_data['grid_y'], int):
-                    token_copy = token_data.copy()
-                    token_copy['footprint_w'], token_copy['footprint_h'] = get_footprint_dimensions(token_copy)
-                    token_copy['visual_fit_mode'] = normalize_visual_fit_mode(
-                        token_copy.get('visual_fit_mode', DEFAULT_TOKEN_VISUAL_FIT_MODE)
-                    )
-                    self._placed_tokens.append(token_copy)
+        self._fog_squares: List[Dict[str, Union[str, int]]] = list(active_tier.get("fog_squares", []))
+        self._placed_tokens: List[Dict[str, Union[str, int]]] = [dict(token) for token in active_tier.get("tokens", [])]
 
         main_layout = QVBoxLayout(self)
         top_h_layout = QHBoxLayout() 
@@ -1080,6 +1248,27 @@ class EncounterSetupDialog(QDialog):
         self._map_asset_list.setIconSize(PREVIEW_MAP_DISPLAY_SIZE)
         self._map_asset_list.setMinimumHeight(120)
         map_asset_layout.addWidget(self._map_asset_list)
+        self._setup_tiers_button = QPushButton("Setup Tiers/Stages")
+        self._setup_tiers_button.setCheckable(True)
+        self._setup_tiers_button.setChecked(len(self._map_tiers) > 1 or "map_tiers" in settings)
+        map_asset_layout.addWidget(self._setup_tiers_button)
+        self._multi_map_group = QGroupBox("Multi-Map Setup")
+        multi_map_layout = QVBoxLayout(self._multi_map_group)
+        tier_count_layout = QHBoxLayout()
+        tier_count_layout.addWidget(QLabel("Stages:"))
+        self._tier_count_spinbox = QSpinBox()
+        self._tier_count_spinbox.setRange(1, MAX_MAP_TIERS)
+        self._tier_count_spinbox.setValue(len(self._map_tiers))
+        tier_count_layout.addWidget(self._tier_count_spinbox)
+        tier_count_layout.addStretch(1)
+        multi_map_layout.addLayout(tier_count_layout)
+        self._tier_rows_container = QWidget()
+        self._tier_rows_layout = QVBoxLayout(self._tier_rows_container)
+        self._tier_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._tier_rows_layout.setSpacing(6)
+        multi_map_layout.addWidget(self._tier_rows_container)
+        self._multi_map_group.setVisible(self._setup_tiers_button.isChecked())
+        map_asset_layout.addWidget(self._multi_map_group)
         map_file_layout.addWidget(map_asset_group)
         right_v_layout.addWidget(map_file_group)
         grid_group = QGroupBox("Grid Settings"); grid_form_layout = QFormLayout(grid_group); grid_form_layout.setSpacing(8)
@@ -1099,6 +1288,16 @@ class EncounterSetupDialog(QDialog):
         self._fog_color_button = QPushButton("Choose Color")
         grid_form_layout.addRow("Fog Color:", self._fog_color_button)
         right_v_layout.addWidget(grid_group)
+        token_group = QGroupBox("Available Tokens (Drag to Preview / Right-Click to Edit Profile)"); token_layout = QVBoxLayout(token_group)
+        browse_token_button = QPushButton("Browse Token...")
+        browse_token_button.setToolTip("Add token image files to the project asset bin.")
+        token_layout.addWidget(browse_token_button)
+        self._token_asset_list = DraggableTokenListWidget()
+        self._token_asset_list.setIconSize(PREVIEW_TOKEN_DISPLAY_SIZE) # Use shared constant
+        self._token_asset_list.setMinimumHeight(150)
+        self._token_asset_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        token_layout.addWidget(self._token_asset_list)
+        right_v_layout.addWidget(token_group, 1)
         music_group = QGroupBox("Battle Music"); music_v_layout = QVBoxLayout(music_group); music_h_layout = QHBoxLayout()
         self._battle_music_label = QLabel("Music: None"); self._battle_music_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred); self._battle_music_label.setWordWrap(True)
         select_music_button = QPushButton("Select Music..."); remove_music_button = QPushButton("Remove"); remove_music_button.setToolTip("Clear selected battle music")
@@ -1120,16 +1319,6 @@ class EncounterSetupDialog(QDialog):
         music_volume_layout.addRow("Loop:", self._battle_music_loop_checkbox)
         music_v_layout.addLayout(music_volume_layout)
         right_v_layout.addWidget(music_group)
-        token_group = QGroupBox("Available Tokens (Drag to Preview / Right-Click to Edit Profile)"); token_layout = QVBoxLayout(token_group)
-        browse_token_button = QPushButton("Browse Token...")
-        browse_token_button.setToolTip("Add token image files to the project asset bin.")
-        token_layout.addWidget(browse_token_button)
-        self._token_asset_list = DraggableTokenListWidget() 
-        self._token_asset_list.setIconSize(PREVIEW_TOKEN_DISPLAY_SIZE) # Use shared constant
-        self._token_asset_list.setMinimumHeight(150) 
-        self._token_asset_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        token_layout.addWidget(self._token_asset_list)
-        right_v_layout.addWidget(token_group, 1) 
         right_v_layout.addStretch(0)
         right_scroll_area.setWidget(right_panel)
         top_h_layout.addWidget(right_scroll_area, 1)
@@ -1160,9 +1349,12 @@ class EncounterSetupDialog(QDialog):
         self._preview_zoom_fit_button.clicked.connect(self._preview_label.resetZoom)
         self._token_asset_list.customContextMenuRequested.connect(self._show_token_list_context_menu)
         self._map_asset_list.itemDoubleClicked.connect(self._set_map_from_asset_item)
+        self._setup_tiers_button.toggled.connect(self._multi_map_group.setVisible)
+        self._tier_count_spinbox.valueChanged.connect(self._set_tier_count)
         self._music_asset_list.itemDoubleClicked.connect(self._set_music_from_asset_item)
 
         self.populate_map_asset_list()
+        self._rebuild_tier_rows()
         self.populate_music_asset_list()
         self.populate_token_list(self._available_token_paths)
         self._refresh_placed_token_size_cache()
@@ -1181,6 +1373,154 @@ class EncounterSetupDialog(QDialog):
     @pyqtSlot(float)
     def _update_preview_zoom_label(self, zoom_level: float):
         self._preview_zoom_label.setText(f"{int(round(zoom_level * 100.0))}%")
+
+    def _get_active_tier_data(self) -> Dict:
+        for tier in self._map_tiers:
+            if tier.get("id") == self._active_tier_id:
+                return tier
+        if not self._map_tiers:
+            self._map_tiers = [self._default_tier_from_settings({})]
+        self._active_tier_id = self._map_tiers[0]["id"]
+        return self._map_tiers[0]
+
+    def _save_current_preview_to_active_tier(self):
+        tier = self._get_active_tier_data()
+        self._update_grid_settings_from_ui()
+        self._fog_squares = self._preview_label.getFogSquares()
+        tier.update({
+            "map_path": self._map_path,
+            "show_grid": self._show_grid,
+            "grid_size": self._grid_size,
+            "grid_offset_x": self._grid_offset_x,
+            "grid_offset_y": self._grid_offset_y,
+            "tokens": [dict(token) for token in self._placed_tokens],
+            "fog_squares": list(self._fog_squares),
+        })
+
+    def _load_active_tier_to_preview(self):
+        tier = self._get_active_tier_data()
+        self._map_path = str(tier.get("map_path", ""))
+        self._show_grid = bool(tier.get("show_grid", True))
+        self._grid_size = int(tier.get("grid_size", 50))
+        self._grid_offset_x = int(tier.get("grid_offset_x", 0))
+        self._grid_offset_y = int(tier.get("grid_offset_y", 0))
+        self._fog_squares = list(tier.get("fog_squares", []))
+        self._placed_tokens = [dict(token) for token in tier.get("tokens", [])]
+
+        self._show_grid_checkbox.blockSignals(True); self._show_grid_checkbox.setChecked(self._show_grid); self._show_grid_checkbox.blockSignals(False)
+        self._grid_size_spinbox.blockSignals(True); self._grid_size_spinbox.setValue(self._grid_size); self._grid_size_spinbox.blockSignals(False)
+        self._grid_offset_x_spinbox.blockSignals(True); self._grid_offset_x_spinbox.setValue(self._grid_offset_x); self._grid_offset_x_spinbox.blockSignals(False)
+        self._grid_offset_y_spinbox.blockSignals(True); self._grid_offset_y_spinbox.setValue(self._grid_offset_y); self._grid_offset_y_spinbox.blockSignals(False)
+        self._set_map_path_on_ui(self._map_path, save_to_tier=False)
+        self._update_grid_settings_from_ui()
+        self._preview_label.updateFogSquares(self._fog_squares)
+        self._refresh_placed_token_size_cache()
+        self._preview_label.updatePlacedTokens(self._placed_tokens)
+        self._refresh_tier_row_selection()
+
+    def _clear_tier_rows(self):
+        while self._tier_rows_layout.count():
+            item = self._tier_rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _rebuild_tier_rows(self):
+        self._clear_tier_rows()
+        self._tier_row_widgets.clear()
+        for index, tier in enumerate(self._map_tiers):
+            tier_id = str(tier.get("id") or f"tier_{index + 1}")
+            tier["id"] = tier_id
+            row = QWidget(self._tier_rows_container)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            name_edit = QLineEdit(str(tier.get("name") or f"Stage {index + 1}"))
+            name_edit.setMinimumWidth(90)
+            name_edit.editingFinished.connect(partial(self._update_tier_name_from_row, tier_id, name_edit))
+            drop_field = TierMapDropField(tier_id)
+            drop_field.setMapPath(str(tier.get("map_path", "")))
+            drop_field.selected.connect(partial(self._select_tier, tier_id))
+            drop_field.mapDropped.connect(partial(self._set_tier_map_path, tier_id))
+            import_button = QPushButton("Import Map...")
+            import_button.clicked.connect(partial(self._browse_tier_map, tier_id))
+            select_button = QPushButton("Select")
+            select_button.clicked.connect(partial(self._select_tier, tier_id))
+            row_layout.addWidget(name_edit, 1)
+            row_layout.addWidget(drop_field, 2)
+            row_layout.addWidget(import_button)
+            row_layout.addWidget(select_button)
+            self._tier_rows_layout.addWidget(row)
+            self._tier_row_widgets[tier_id] = {"row": row, "name": name_edit, "drop": drop_field}
+        self._tier_rows_layout.addStretch(1)
+        self._refresh_tier_row_selection()
+
+    def _refresh_tier_row_selection(self):
+        for tier_id, widgets in self._tier_row_widgets.items():
+            drop = widgets.get("drop")
+            if isinstance(drop, TierMapDropField):
+                drop.setSelected(tier_id == self._active_tier_id)
+
+    def _update_tier_name_from_row(self, tier_id: str, name_edit: QLineEdit):
+        for tier in self._map_tiers:
+            if tier.get("id") == tier_id:
+                name = name_edit.text().strip()
+                tier["name"] = name or f"Stage {self._map_tiers.index(tier) + 1}"
+                name_edit.setText(tier["name"])
+                return
+
+    @pyqtSlot(int)
+    def _set_tier_count(self, count: int):
+        self._save_current_preview_to_active_tier()
+        target_count = max(1, min(MAX_MAP_TIERS, int(count)))
+        while len(self._map_tiers) < target_count:
+            next_index = len(self._map_tiers) + 1
+            self._map_tiers.append({
+                "id": f"tier_{next_index}",
+                "name": f"Stage {next_index}",
+                "map_path": "",
+                "show_grid": self._show_grid,
+                "grid_size": self._grid_size,
+                "grid_offset_x": self._grid_offset_x,
+                "grid_offset_y": self._grid_offset_y,
+                "tokens": [],
+                "fog_squares": [],
+            })
+        if len(self._map_tiers) > target_count:
+            self._map_tiers = self._map_tiers[:target_count]
+            if not any(tier.get("id") == self._active_tier_id for tier in self._map_tiers):
+                self._active_tier_id = self._map_tiers[-1]["id"]
+                self._load_active_tier_to_preview()
+        self._rebuild_tier_rows()
+
+    def _select_tier(self, tier_id: str):
+        if tier_id == self._active_tier_id:
+            self._refresh_tier_row_selection()
+            return
+        if not any(tier.get("id") == tier_id for tier in self._map_tiers):
+            return
+        self._save_current_preview_to_active_tier()
+        self._active_tier_id = tier_id
+        self._load_active_tier_to_preview()
+
+    def _set_tier_map_path(self, tier_id: str, path: str):
+        if not path:
+            return
+        if tier_id != self._active_tier_id:
+            self._select_tier(tier_id)
+        self._set_map_path_on_ui(path)
+        widgets = self._tier_row_widgets.get(tier_id, {})
+        drop = widgets.get("drop")
+        if isinstance(drop, TierMapDropField):
+            drop.setMapPath(path)
+
+    def _browse_tier_map(self, tier_id: str):
+        current_tier = next((tier for tier in self._map_tiers if tier.get("id") == tier_id), {})
+        current_path = current_tier.get("map_path") if isinstance(current_tier, dict) else ""
+        current_dir = os.path.dirname(current_path) if current_path and os.path.exists(os.path.dirname(current_path)) else ""
+        file_name, _ = QFileDialog.getOpenFileName(self, "Select Tier Map Image", current_dir, "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
+        if file_name:
+            self._set_tier_map_path(tier_id, file_name)
 
     def _normalize_token_size_squares(self, raw_size: Union[int, str, None]) -> int:
         try:
@@ -1339,6 +1679,7 @@ class EncounterSetupDialog(QDialog):
             'footprint_w': footprint_w,
             'footprint_h': footprint_h,
             'visual_fit_mode': normalize_visual_fit_mode(display_info.get('visual_fit_mode')),
+            'combat_participation': COMBAT_PARTICIPATION_ACTIVE,
         }
         self._placed_tokens.append(token_entry)
         self._preview_label.updatePlacedTokens(self._placed_tokens)
@@ -1355,7 +1696,7 @@ class EncounterSetupDialog(QDialog):
         fileName, _ = QFileDialog.getOpenFileName(self, "Select Map Image", current_dir, "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
         if fileName: self._set_map_path_on_ui(fileName)
 
-    def _set_map_path_on_ui(self, path: str):
+    def _set_map_path_on_ui(self, path: str, save_to_tier: bool = True):
         self._map_path = path 
         if path and os.path.exists(path):
             base_name = os.path.basename(path); display_name = base_name if len(base_name) <= 40 else f"...{base_name[-37:]}"
@@ -1365,6 +1706,13 @@ class EncounterSetupDialog(QDialog):
             else: self._preview_label.setPixmap(pixmap)
         else:
             self._map_path = ""; self._map_path_label.setText("No map selected."); self._map_path_label.setToolTip(""); self._preview_label.setPixmap(QPixmap())
+        if save_to_tier:
+            tier = self._get_active_tier_data()
+            tier["map_path"] = self._map_path
+            widgets = self._tier_row_widgets.get(str(tier.get("id")), {})
+            drop = widgets.get("drop")
+            if isinstance(drop, TierMapDropField):
+                drop.setMapPath(self._map_path)
 
     @pyqtSlot()
     def _select_battle_music(self):
@@ -1439,7 +1787,7 @@ class EncounterSetupDialog(QDialog):
         self._update_fog_tool_from_ui()
 
     def _set_initial_settings_on_ui(self, settings: Dict):
-        self._set_map_path_on_ui(str(settings.get("map_path", DEFAULT_MAP_PATH or "")))
+        self._load_active_tier_to_preview()
         self._battle_music_path = settings.get("battle_music_path"); self._update_battle_music_label_ui()
         try:
             self._battle_music_volume = max(0.0, min(1.0, float(settings.get("battle_music_volume", 1.0))))
@@ -1447,10 +1795,10 @@ class EncounterSetupDialog(QDialog):
             self._battle_music_volume = 1.0
         self._battle_music_volume_spinbox.blockSignals(True); self._battle_music_volume_spinbox.setValue(int(round(self._battle_music_volume * 100.0))); self._battle_music_volume_spinbox.blockSignals(False)
         self._battle_music_loop_checkbox.blockSignals(True); self._battle_music_loop_checkbox.setChecked(bool(settings.get("battle_music_loop", True))); self._battle_music_loop_checkbox.blockSignals(False)
-        self._show_grid_checkbox.blockSignals(True); self._show_grid_checkbox.setChecked(bool(settings.get("show_grid", True))); self._show_grid_checkbox.blockSignals(False)
-        self._grid_size_spinbox.blockSignals(True); self._grid_size_spinbox.setValue(int(settings.get("grid_size", 50))); self._grid_size_spinbox.blockSignals(False)
-        self._grid_offset_x_spinbox.blockSignals(True); self._grid_offset_x_spinbox.setValue(int(settings.get("grid_offset_x", 0))); self._grid_offset_x_spinbox.blockSignals(False)
-        self._grid_offset_y_spinbox.blockSignals(True); self._grid_offset_y_spinbox.setValue(int(settings.get("grid_offset_y", 0))); self._grid_offset_y_spinbox.blockSignals(False)
+        self._show_grid_checkbox.blockSignals(True); self._show_grid_checkbox.setChecked(bool(self._show_grid)); self._show_grid_checkbox.blockSignals(False)
+        self._grid_size_spinbox.blockSignals(True); self._grid_size_spinbox.setValue(int(self._grid_size)); self._grid_size_spinbox.blockSignals(False)
+        self._grid_offset_x_spinbox.blockSignals(True); self._grid_offset_x_spinbox.setValue(int(self._grid_offset_x)); self._grid_offset_x_spinbox.blockSignals(False)
+        self._grid_offset_y_spinbox.blockSignals(True); self._grid_offset_y_spinbox.setValue(int(self._grid_offset_y)); self._grid_offset_y_spinbox.blockSignals(False)
         self._add_fog_checkbox.blockSignals(True); self._add_fog_checkbox.setChecked(False); self._add_fog_checkbox.blockSignals(False)
         self._fog_mode_combo.blockSignals(True)
         self._fog_mode_combo.setCurrentIndex(max(0, self._fog_mode_combo.findData(DEFAULT_FOG_MODE)))
@@ -1466,11 +1814,40 @@ class EncounterSetupDialog(QDialog):
         self._preview_label.updatePlacedTokens(self._placed_tokens)
 
     def get_settings(self) -> Dict:
+        self._save_current_preview_to_active_tier()
         self._update_grid_settings_from_ui() 
         self._update_battle_music_volume_from_ui()
         self._update_battle_music_loop_from_ui()
         self._fog_squares = self._preview_label.getFogSquares()
-        return {"map_path": self._map_path, "battle_music_path": self._battle_music_path, "battle_music_volume": self._battle_music_volume, "battle_music_loop": self._battle_music_loop, "show_grid": self._show_grid, "grid_size": self._grid_size, "grid_offset_x": self._grid_offset_x, "grid_offset_y": self._grid_offset_y, "tokens": list(self._placed_tokens), "fog_squares": list(self._fog_squares)}
+        active_tier = self._get_active_tier_data()
+        primary_tier = self._map_tiers[0] if self._map_tiers else active_tier
+        return {
+            "map_path": primary_tier.get("map_path", self._map_path),
+            "battle_music_path": self._battle_music_path,
+            "battle_music_volume": self._battle_music_volume,
+            "battle_music_loop": self._battle_music_loop,
+            "show_grid": primary_tier.get("show_grid", self._show_grid),
+            "grid_size": primary_tier.get("grid_size", self._grid_size),
+            "grid_offset_x": primary_tier.get("grid_offset_x", self._grid_offset_x),
+            "grid_offset_y": primary_tier.get("grid_offset_y", self._grid_offset_y),
+            "tokens": [dict(token) for token in primary_tier.get("tokens", [])],
+            "fog_squares": list(primary_tier.get("fog_squares", [])),
+            "active_tier_id": self._active_tier_id,
+            "map_tiers": [
+                {
+                    "id": str(tier.get("id") or f"tier_{index + 1}"),
+                    "name": str(tier.get("name") or f"Stage {index + 1}"),
+                    "map_path": str(tier.get("map_path", "")),
+                    "show_grid": bool(tier.get("show_grid", True)),
+                    "grid_size": int(tier.get("grid_size", 50)),
+                    "grid_offset_x": int(tier.get("grid_offset_x", 0)),
+                    "grid_offset_y": int(tier.get("grid_offset_y", 0)),
+                    "tokens": [dict(token) for token in tier.get("tokens", [])],
+                    "fog_squares": list(tier.get("fog_squares", [])),
+                }
+                for index, tier in enumerate(self._map_tiers)
+            ],
+        }
 
     @pyqtSlot(QPoint)
     def _show_token_list_context_menu(self, pos: QPoint):

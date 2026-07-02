@@ -4,7 +4,7 @@ import copy
 import time
 from typing import Any, Union
 
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QRectF, pyqtSignal, pyqtSlot, QSignalBlocker
 from PyQt6.QtGui import QColor, QPainter, QPen, QMouseEvent, QPalette
 from PyQt6.QtWidgets import (
     QDialog,
@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QColorDialog,
+    QAbstractItemView,
 )
 
 from .timeline_editor import TimelineEditorWidget
@@ -287,6 +288,88 @@ class MiniTimelinePreview(QWidget):
         return super().leaveEvent(event)
 
 
+class BattleTokenListWidget(QListWidget):
+    tokenSelectionCommitted = pyqtSignal(str, list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.last_clicked_token_id: Union[str, None] = None
+        self._tracked_selected_token_ids: set[str] = set()
+
+    def set_tracked_selection(self, token_ids: set[str], reset_shift_mode: bool = True) -> None:
+        self._tracked_selected_token_ids = set(token_ids)
+        self._apply_tracked_selection_to_items()
+
+    def _apply_tracked_selection_to_items(self) -> None:
+        blocker = QSignalBlocker(self)
+        try:
+            for row in range(self.count()):
+                item = self.item(row)
+                if item is None:
+                    continue
+                token_id = item.data(Qt.ItemDataRole.UserRole)
+                item.setSelected(isinstance(token_id, str) and token_id in self._tracked_selected_token_ids)
+        finally:
+            del blocker
+
+    def mousePressEvent(self, event: QMouseEvent):
+        try:
+            if event.button() != Qt.MouseButton.LeftButton:
+                return super().mousePressEvent(event)
+            item = self.itemAt(event.position().toPoint())
+            if item is None:
+                self.last_clicked_token_id = None
+                self._tracked_selected_token_ids = set()
+                self._apply_tracked_selection_to_items()
+                self.tokenSelectionCommitted.emit("", [])
+                event.accept()
+                return
+            token_id = item.data(Qt.ItemDataRole.UserRole)
+            self.last_clicked_token_id = token_id if isinstance(token_id, str) and token_id else None
+            if not self.last_clicked_token_id:
+                event.accept()
+                return
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                if self.last_clicked_token_id in self._tracked_selected_token_ids:
+                    self._tracked_selected_token_ids.remove(self.last_clicked_token_id)
+                else:
+                    self._tracked_selected_token_ids.add(self.last_clicked_token_id)
+                self._apply_tracked_selection_to_items()
+                ordered_ids = self._ordered_tracked_token_ids()
+                selected_id = self.last_clicked_token_id if self.last_clicked_token_id in ordered_ids else (ordered_ids[-1] if ordered_ids else "")
+                self.tokenSelectionCommitted.emit(
+                    selected_id,
+                    ordered_ids,
+                )
+                event.accept()
+                return
+            self._tracked_selected_token_ids = {self.last_clicked_token_id}
+            self._apply_tracked_selection_to_items()
+            self.tokenSelectionCommitted.emit(self.last_clicked_token_id, [self.last_clicked_token_id])
+            event.accept()
+        except Exception as exc:
+            print(f"Warning: token list selection click failed: {exc}")
+            event.accept()
+            return
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            event.accept()
+            return
+        return super().mouseMoveEvent(event)
+
+    def _ordered_tracked_token_ids(self) -> list[str]:
+        ordered_token_ids: list[str] = []
+        for row in range(self.count()):
+            item = self.item(row)
+            if item is None:
+                continue
+            token_id = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(token_id, str) and token_id in self._tracked_selected_token_ids:
+                ordered_token_ids.append(token_id)
+        return ordered_token_ids
+
+
 class DMControlPanelDialog(QDialog):
     runtimeStateChanged = pyqtSignal(dict)
     applyClipChangesRequested = pyqtSignal()
@@ -298,6 +381,8 @@ class DMControlPanelDialog(QDialog):
     initiativeManagerRequested = pyqtSignal()
     movementCountModeChanged = pyqtSignal(str)
     fogToolSettingsChanged = pyqtSignal(bool, str, str)
+    battleTokenParticipationChanged = pyqtSignal(list, str)
+    battleTokenMoveStageRequested = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -316,6 +401,7 @@ class DMControlPanelDialog(QDialog):
         self._in_battle_mode = False
         self._battle_tokens: list[dict[str, Any]] = []
         self._selected_battle_token_id: Union[str, None] = None
+        self._selected_battle_token_ids: set[str] = set()
         self._is_refreshing_battle_tokens_ui = False
         self._is_refreshing_movement_mode_ui = False
         self._fog_color = DEFAULT_FOG_COLOR
@@ -448,6 +534,7 @@ class DMControlPanelDialog(QDialog):
         skip_layout.addLayout(skip_button_row)
 
         self.skip_range_list = QListWidget()
+        self.skip_range_list.setMinimumHeight(82)
         skip_layout.addWidget(self.skip_range_list, 1)
 
         session_group = QGroupBox("Session Controls")
@@ -477,26 +564,37 @@ class DMControlPanelDialog(QDialog):
 
         token_group = QGroupBox("Encounter Token Controls")
         token_layout = QVBoxLayout(token_group)
-        self.battle_token_list = QListWidget()
+        self.battle_token_list = BattleTokenListWidget()
+        self.battle_token_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
         token_layout.addWidget(self.battle_token_list)
         self.movement_count_mode_combo = QComboBox()
         self.movement_count_mode_combo.addItem("5e simple diagonals", "5e_simple")
         self.movement_count_mode_combo.addItem("Orthogonal diagonals", "orthogonal")
         self.movement_count_mode_combo.addItem("DMG alternating diagonals", "dmg_alternating")
+        self.movement_count_mode_combo.setStyleSheet(
+            "QComboBox { background-color: #4b5563; color: #ffffff; border: 1px solid #aeb6bf; padding: 4px 8px; }"
+            "QComboBox QAbstractItemView { background-color: #374151; color: #ffffff; selection-background-color: #2563eb; }"
+        )
         token_layout.addWidget(QLabel("Movement Count Rule"))
         token_layout.addWidget(self.movement_count_mode_combo)
         self.manage_initiative_button = QPushButton("Manage Initiative...")
         token_layout.addWidget(self.manage_initiative_button)
+        self.toggle_participation_button = QPushButton("Set Reserve")
+        token_layout.addWidget(self.toggle_participation_button)
+        self.move_stage_button = QPushButton("Move to Stage...")
+        token_layout.addWidget(self.move_stage_button)
         self.edit_token_profile_button = QPushButton("Edit Profile...")
         token_layout.addWidget(self.edit_token_profile_button)
-        controls_layout.addWidget(token_group, 1)
+        controls_layout.addWidget(token_group)
 
         action_row = QHBoxLayout()
+        action_widget = QWidget(controls_container)
+        action_widget.setLayout(action_row)
         self.reset_overrides_button = QPushButton("Reset Session Overrides")
         self.apply_to_campaign_button = QPushButton("Apply Clip Changes to Campaign")
         action_row.addWidget(self.reset_overrides_button)
         action_row.addWidget(self.apply_to_campaign_button)
-        controls_layout.addLayout(action_row)
+        controls_layout.addWidget(action_widget)
         controls_layout.addStretch(1)
 
         self.clip_list.itemSelectionChanged.connect(self._handle_clip_list_selection_changed)
@@ -529,9 +627,11 @@ class DMControlPanelDialog(QDialog):
         self.add_fog_checkbox.stateChanged.connect(self._handle_fog_tool_settings_changed)
         self.fog_mode_combo.currentIndexChanged.connect(self._handle_fog_tool_settings_changed)
         self.fog_color_button.clicked.connect(self._choose_fog_color)
-        self.battle_token_list.itemSelectionChanged.connect(self._handle_battle_token_selection_changed)
+        self.battle_token_list.tokenSelectionCommitted.connect(self._handle_battle_token_selection_committed)
         self.movement_count_mode_combo.currentIndexChanged.connect(self._handle_movement_count_mode_changed)
         self.manage_initiative_button.clicked.connect(self.initiativeManagerRequested.emit)
+        self.toggle_participation_button.clicked.connect(self._handle_toggle_participation_clicked)
+        self.move_stage_button.clicked.connect(self._handle_move_stage_clicked)
         self.edit_token_profile_button.clicked.connect(self._handle_edit_token_profile_clicked)
         self.set_session_controls_state(False, False)
         self._refresh_fog_color_button()
@@ -744,19 +844,25 @@ class DMControlPanelDialog(QDialog):
                     "hp": token.get("hp"),
                     "max_hp": token.get("max_hp"),
                     "initiative": token.get("initiative"),
+                    "combat_participation": str(token.get("combat_participation", "active")),
+                    "tier_id": str(token.get("tier_id", "")),
+                    "tier_name": str(token.get("tier_name", "")),
                     "status": str(token.get("status", "alive")),
                 }
             )
         self._battle_tokens = normalized_tokens
-        self._selected_battle_token_id = (
-            selected_token_id
-            if isinstance(selected_token_id, str) and selected_token_id
-            else self._selected_battle_token_id
-        )
-        if self._selected_battle_token_id and not any(
-            token.get("id") == self._selected_battle_token_id for token in self._battle_tokens
-        ):
+        valid_token_ids = {str(token.get("id", "")) for token in self._battle_tokens if str(token.get("id", ""))}
+        if isinstance(selected_token_id, str) and selected_token_id in valid_token_ids:
+            self._selected_battle_token_id = selected_token_id
+            if not self._selected_battle_token_ids:
+                self._selected_battle_token_ids = {selected_token_id}
+        elif self._selected_battle_token_id not in valid_token_ids:
             self._selected_battle_token_id = None
+        self._selected_battle_token_ids = {
+            token_id for token_id in self._selected_battle_token_ids if token_id in valid_token_ids
+        }
+        if self._selected_battle_token_id and not self._selected_battle_token_ids:
+            self._selected_battle_token_ids = {self._selected_battle_token_id}
         self._refresh_battle_token_controls()
 
     def set_movement_count_mode(self, mode: str) -> None:
@@ -1248,36 +1354,119 @@ class DMControlPanelDialog(QDialog):
             initiative = token.get("initiative")
             initiative_text = str(initiative) if initiative is not None else "N/A"
             status_text = str(token.get("status", "alive")).capitalize()
-            item = QListWidgetItem(f"{token_name} | HP {hp}/{max_hp} | Init {initiative_text} | {status_text}")
+            tier_name = str(token.get("tier_name") or "Stage")
+            participation = str(token.get("combat_participation", "active")).strip().lower()
+            participation_text = "Reserve" if participation == "reserve" else "Active"
+            item = QListWidgetItem(f"{token_name} | {tier_name} | {participation_text} | HP {hp}/{max_hp} | Init {initiative_text} | {status_text}")
             item.setData(Qt.ItemDataRole.UserRole, token_id)
             self.battle_token_list.addItem(item)
-            if token_id == self._selected_battle_token_id:
+            if token_id in self._selected_battle_token_ids or token_id == self._selected_battle_token_id:
                 item.setSelected(True)
 
         if self._selected_battle_token_id is None and self.battle_token_list.count() > 0:
             first_item = self.battle_token_list.item(0)
             if first_item is not None:
-                first_item.setSelected(True)
                 first_id = first_item.data(Qt.ItemDataRole.UserRole)
                 self._selected_battle_token_id = str(first_id) if isinstance(first_id, str) and first_id else None
+                self._selected_battle_token_ids = {self._selected_battle_token_id} if self._selected_battle_token_id else set()
 
+        self.battle_token_list.set_tracked_selection(self._selected_battle_token_ids)
+        self._resize_battle_token_list_to_visible_rows()
         self.battle_token_list.setEnabled(should_enable_list)
         self.manage_initiative_button.setEnabled(self._in_battle_mode)
-        self.edit_token_profile_button.setEnabled(True)
+        self._refresh_battle_token_action_controls()
         self._is_refreshing_battle_tokens_ui = False
 
-    def _handle_battle_token_selection_changed(self) -> None:
+    def _resize_battle_token_list_to_visible_rows(self) -> None:
+        token_count = self.battle_token_list.count()
+        visible_rows = min(max(token_count, 1), 10)
+        row_height = self.battle_token_list.sizeHintForRow(0)
+        if row_height <= 0:
+            row_height = self.battle_token_list.fontMetrics().height() + 12
+        frame_width = self.battle_token_list.frameWidth() * 2
+        height = (row_height * visible_rows) + frame_width
+        self.battle_token_list.setMinimumHeight(height)
+        self.battle_token_list.setMaximumHeight(height)
+        self.battle_token_list.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded if token_count > 10 else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.battle_token_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.battle_token_list.updateGeometry()
+
+    def _refresh_battle_token_action_controls(self) -> None:
+        has_selected_token = bool(self._selected_battle_token_ids or self._selected_battle_token_id)
+        self.toggle_participation_button.setEnabled(self._in_battle_mode and has_selected_token)
+        self.move_stage_button.setEnabled(self._in_battle_mode and has_selected_token)
+        selected_count = len(self._selected_battle_token_ids)
+        self.move_stage_button.setText(
+            f"Move {selected_count} to Stage..." if selected_count > 1 else "Move to Stage..."
+        )
+        selected_ids = self._ordered_selected_battle_token_ids()
+        selected_tokens = [
+            token
+            for token in self._battle_tokens
+            if str(token.get("id", "")) in selected_ids
+        ]
+        all_selected_reserve = bool(selected_tokens) and all(
+            str(token.get("combat_participation", "active")).strip().lower() == "reserve"
+            for token in selected_tokens
+        )
+        self.toggle_participation_button.setText("Set Active" if all_selected_reserve else "Set Reserve")
+        self.edit_token_profile_button.setEnabled(True)
+
+    def _handle_battle_token_selection_committed(self, selected_id: str, selected_ids: list) -> None:
         if self._is_refreshing_battle_tokens_ui:
             return
-        current_item = self.battle_token_list.currentItem()
-        selected_id = current_item.data(Qt.ItemDataRole.UserRole) if current_item else None
+        normalized_selected_ids = [
+            token_id for token_id in selected_ids if isinstance(token_id, str) and token_id
+        ]
+        selected_id = selected_id if isinstance(selected_id, str) and selected_id in normalized_selected_ids else None
+        if selected_id is None and normalized_selected_ids:
+            selected_id = normalized_selected_ids[-1]
         if isinstance(selected_id, str) and selected_id:
             self._selected_battle_token_id = selected_id
+            self._selected_battle_token_ids = set(normalized_selected_ids) or {selected_id}
             self.edit_token_profile_button.setEnabled(True)
             self.battleTokenSelectionChanged.emit(selected_id)
+            self._refresh_battle_token_action_controls()
             return
         self._selected_battle_token_id = None
+        self._selected_battle_token_ids = set()
         self.edit_token_profile_button.setEnabled(True)
+        self._refresh_battle_token_action_controls()
+
+    def _handle_toggle_participation_clicked(self) -> None:
+        selected_ids = self._ordered_selected_battle_token_ids()
+        if not selected_ids:
+            return
+        selected_tokens = [
+            token
+            for token in self._battle_tokens
+            if str(token.get("id", "")) in selected_ids
+        ]
+        all_selected_reserve = bool(selected_tokens) and all(
+            str(token.get("combat_participation", "active")).strip().lower() == "reserve"
+            for token in selected_tokens
+        )
+        self.battleTokenParticipationChanged.emit(
+            selected_ids,
+            "active" if all_selected_reserve else "reserve",
+        )
+
+    def _handle_move_stage_clicked(self) -> None:
+        selected_ids = self._ordered_selected_battle_token_ids()
+        if selected_ids:
+            self.battleTokenMoveStageRequested.emit(selected_ids)
+
+    def _ordered_selected_battle_token_ids(self) -> list[str]:
+        selected_ids = [
+            str(token.get("id"))
+            for token in self._battle_tokens
+            if str(token.get("id", "")) in self._selected_battle_token_ids
+        ]
+        if not selected_ids and self._selected_battle_token_id:
+            selected_ids = [self._selected_battle_token_id]
+        return selected_ids
 
     def _handle_movement_count_mode_changed(self) -> None:
         if self._is_refreshing_movement_mode_ui:

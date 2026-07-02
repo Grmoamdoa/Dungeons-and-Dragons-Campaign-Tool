@@ -379,6 +379,9 @@ class AssetBinWidget(QWidget):
     def get_token_asset_paths(self) -> list[str]:
         return list(self.assets.get('tokens', []))
 
+    def get_image_asset_paths(self) -> list[str]:
+        return list(self.assets.get('images', []))
+
     def get_audio_asset_paths(self) -> list[str]:
         return list(self.assets.get('audio', []))
 
