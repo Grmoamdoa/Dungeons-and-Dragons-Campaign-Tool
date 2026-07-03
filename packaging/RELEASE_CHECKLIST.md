@@ -5,7 +5,7 @@ Use this checklist for each public packaged release.
 ## 1. Prepare the Release
 
 - Confirm the GitHub repository is the correct project repository before publishing assets.
-- Choose the release version, for example `1.2.2`.
+- Choose the release version, for example `1.2.3`.
 - Review open issues that would block packaging or installation.
 - Verify `README.md` installation steps still match the packaged release.
 
@@ -57,10 +57,10 @@ Record the SHA256 values in the release notes.
   - SHA256 checksums
 - Download each artifact from GitHub once and confirm the uploaded files match local checksums.
 
-## 1.2.2 Release Status
+## 1.2.3 Release Status
 
-- Done: source tree prepared for the `1.2.2` release.
+- Done: source tree prepared for the `1.2.3` release.
 - Done: repository ignores local build output, virtual environments, macOS metadata, and local `.dcp` campaign saves.
 - Done: public-facing source files and release docs were scrubbed of personal names and machine-specific paths.
-- Next: build the macOS and Windows installer artifacts with version `1.2.2`.
-- Next: smoke test both installers, generate SHA256 checksums, and attach them to a GitHub Release tagged `v1.2.2`.
+- Next: build the macOS and Windows installer artifacts with version `1.2.3`.
+- Next: smoke test both installers, generate SHA256 checksums, and attach them to a GitHub Release tagged `v1.2.3`.

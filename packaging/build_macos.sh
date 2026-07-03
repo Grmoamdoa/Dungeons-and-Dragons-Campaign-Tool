@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-VERSION="${1:-1.2.2}"
+VERSION="${1:-1.2.3}"
 APP_NAME="DND Campaign Presenter"
 APP_BUNDLE_NAME="${APP_NAME}.app"
 OUTPUT_ROOT="${PROJECT_ROOT}/packaging/output"

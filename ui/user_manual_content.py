@@ -100,6 +100,7 @@ You build clips in the timeline, trigger encounters from battle markers, then re
   - `Edit Profile...` opens the `Token Profile Management` dialog first, so you can pick which token profile to edit.
   - From Token Profile Management, click `Edit Profile...` to open the profile editor.
   - Profile edits now sync to matching placed tokens on the battle map immediately after saving (including footprint size / visual-fit changes).
+  - `Set Hidden` / `Set Visible` changes player-view visibility for the selected encounter tokens; the button color indicates visible, hidden, or mixed selections.
 - Mini timeline features:
   - Hover shows a thin vertical guide and exact cursor time readout.
   - Clip blocks display clip names (elided if narrow).

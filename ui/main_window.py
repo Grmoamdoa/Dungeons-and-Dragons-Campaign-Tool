@@ -812,6 +812,11 @@ class MainWindow(QMainWindow):
                 "_handle_dm_battle_token_participation_changed",
             )
             self._connect_safe(
+                self.dm_control_panel.battleTokenVisibilityChanged,
+                self._handle_dm_battle_token_visibility_changed,
+                "_handle_dm_battle_token_visibility_changed",
+            )
+            self._connect_safe(
                 self.dm_control_panel.battleTokenMoveStageRequested,
                 self._handle_dm_battle_token_move_stage_requested,
                 "_handle_dm_battle_token_move_stage_requested",
@@ -830,6 +835,11 @@ class MainWindow(QMainWindow):
                 self.dm_control_panel.fogToolSettingsChanged,
                 self._handle_dm_fog_tool_settings_changed,
                 "_handle_dm_fog_tool_settings_changed",
+            )
+            self._connect_safe(
+                self.dm_control_panel.difficultTerrainToolToggled,
+                self._handle_dm_difficult_terrain_tool_toggled,
+                "_handle_dm_difficult_terrain_tool_toggled",
             )
             self.dm_control_panel.set_movement_count_mode(self._movement_count_mode)
         return self.dm_control_panel
@@ -1360,6 +1370,24 @@ class MainWindow(QMainWindow):
             self._sync_dm_panel_from_timeline()
             self._request_player_battle_snapshot_refresh()
 
+    @pyqtSlot(list, str)
+    def _handle_dm_battle_token_visibility_changed(self, token_ids: list, visibility: str):
+        if not self.battle_map_widget:
+            return
+        normalized_token_ids = [
+            token_id
+            for token_id in token_ids
+            if isinstance(token_id, str) and token_id
+        ]
+        if not normalized_token_ids:
+            return
+        changed = False
+        for token_id in normalized_token_ids:
+            changed = self.battle_map_widget.set_token_player_visibility(token_id, visibility) or changed
+        if changed:
+            self._sync_dm_panel_from_timeline()
+            self._request_player_battle_snapshot_refresh()
+
     @pyqtSlot(list)
     def _handle_dm_battle_token_move_stage_requested(self, token_ids: list):
         if not self.battle_map_widget:
@@ -1424,6 +1452,11 @@ class MainWindow(QMainWindow):
     def _handle_dm_fog_tool_settings_changed(self, enabled: bool, mode: str, color: str):
         if self.battle_map_widget:
             self.battle_map_widget.set_fog_tool_settings(enabled, mode, color)
+
+    @pyqtSlot(bool)
+    def _handle_dm_difficult_terrain_tool_toggled(self, enabled: bool):
+        if self.battle_map_widget:
+            self.battle_map_widget.set_difficult_terrain_tool_enabled(enabled)
 
     def _resolve_dm_overrides_on_session_end(self) -> bool:
         if not self.timeline_editor or not self.timeline_editor.has_dm_runtime_overrides():

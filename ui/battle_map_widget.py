@@ -226,6 +226,7 @@ FOG_MODE_LABELS = {
 }
 DEFAULT_FOG_MODE = FOG_MODE_HIDE_TOKEN
 DEFAULT_FOG_COLOR = "#8f9297"
+DEFAULT_DIFFICULT_TERRAIN_COLOR = "#7a6f57"
 
 
 def _resolve_resource_path(*parts: str) -> str:
@@ -340,6 +341,7 @@ class BattleMapWidget(QWidget):
         self._map_tiers: list[dict[str, Any]] = []
         self._active_tier_id = DEFAULT_TIER_ID
         self.fog_squares: dict[tuple[int, int], dict[str, Any]] = {}
+        self.difficult_terrain_squares: dict[tuple[int, int], dict[str, Any]] = {}
         self._fog_add_enabled = False
         self._fog_mode = DEFAULT_FOG_MODE
         self._fog_color = DEFAULT_FOG_COLOR
@@ -347,6 +349,11 @@ class BattleMapWidget(QWidget):
         self._fog_drag_current_grid: Optional[Tuple[int, int]] = None
         self._fog_drag_mode: Optional[str] = None
         self._fog_runtime_touched = False
+        self._terrain_add_enabled = False
+        self._terrain_drag_start_grid: Optional[Tuple[int, int]] = None
+        self._terrain_drag_current_grid: Optional[Tuple[int, int]] = None
+        self._terrain_drag_mode: Optional[str] = None
+        self._terrain_runtime_touched = False
         self._selected_token_index: Optional[int] = None
         self.show_grid = True
         self.show_grid_labels = True
@@ -631,8 +638,42 @@ class BattleMapWidget(QWidget):
             })
         return serialized
 
+    @staticmethod
+    def normalize_difficult_terrain_squares(raw_terrain: Any) -> dict[tuple[int, int], dict[str, Any]]:
+        normalized: dict[tuple[int, int], dict[str, Any]] = {}
+        if not isinstance(raw_terrain, list):
+            return normalized
+        for entry in raw_terrain:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                grid_x = int(entry.get("grid_x"))
+                grid_y = int(entry.get("grid_y"))
+            except (TypeError, ValueError):
+                continue
+            normalized[(grid_x, grid_y)] = {"grid_x": grid_x, "grid_y": grid_y}
+        return normalized
+
+    @staticmethod
+    def serialize_difficult_terrain_squares(terrain_squares: dict[tuple[int, int], dict[str, Any]]) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        if not isinstance(terrain_squares, dict):
+            return serialized
+        for key, entry in sorted(terrain_squares.items(), key=lambda item: (item[0][1], item[0][0])):
+            if not isinstance(key, tuple) or len(key) != 2:
+                continue
+            try:
+                grid_x = int(entry.get("grid_x", key[0])) if isinstance(entry, dict) else int(key[0])
+                grid_y = int(entry.get("grid_y", key[1])) if isinstance(entry, dict) else int(key[1])
+            except (TypeError, ValueError):
+                continue
+            serialized.append({"grid_x": grid_x, "grid_y": grid_y})
+        return serialized
+
     def set_fog_tool_settings(self, enabled: bool, mode: Any = None, color: Any = None) -> None:
         self._fog_add_enabled = bool(enabled)
+        if self._fog_add_enabled:
+            self.set_difficult_terrain_tool_enabled(False)
         if mode is not None:
             self._fog_mode = self.normalize_fog_mode(mode)
         if color is not None:
@@ -641,6 +682,22 @@ class BattleMapWidget(QWidget):
         self._fog_drag_current_grid = None
         self._fog_drag_mode = None
         if self._fog_add_enabled and not self._is_in_any_selection_mode() and not self._generated_token_placement_request:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        elif not self._fog_add_enabled:
+            self.unsetCursor()
+        self.update()
+
+    def set_difficult_terrain_tool_enabled(self, enabled: bool) -> None:
+        self._terrain_add_enabled = bool(enabled)
+        if self._terrain_add_enabled:
+            self._fog_add_enabled = False
+            self._fog_drag_start_grid = None
+            self._fog_drag_current_grid = None
+            self._fog_drag_mode = None
+        self._terrain_drag_start_grid = None
+        self._terrain_drag_current_grid = None
+        self._terrain_drag_mode = None
+        if self._terrain_add_enabled and not self._is_in_any_selection_mode() and not self._generated_token_placement_request:
             self.setCursor(Qt.CursorShape.CrossCursor)
         elif not self._fog_add_enabled:
             self.unsetCursor()
@@ -672,6 +729,27 @@ class BattleMapWidget(QWidget):
 
     def _emit_fog_changed(self) -> None:
         self._fog_runtime_touched = True
+        self.tokenDataModified.emit()
+        self.update()
+
+    def _paint_difficult_terrain_rect(self, start_grid: Tuple[int, int], end_grid: Tuple[int, int]) -> bool:
+        changed = False
+        for gx, gy in self._iter_grid_rect_cells(start_grid, end_grid):
+            entry = {"grid_x": gx, "grid_y": gy}
+            if self.difficult_terrain_squares.get((gx, gy)) != entry:
+                self.difficult_terrain_squares[(gx, gy)] = entry
+                changed = True
+        return changed
+
+    def _remove_difficult_terrain_rect(self, start_grid: Tuple[int, int], end_grid: Tuple[int, int]) -> bool:
+        changed = False
+        for cell in self._iter_grid_rect_cells(start_grid, end_grid):
+            if self.difficult_terrain_squares.pop(cell, None) is not None:
+                changed = True
+        return changed
+
+    def _emit_difficult_terrain_changed(self) -> None:
+        self._terrain_runtime_touched = True
         self.tokenDataModified.emit()
         self.update()
 
@@ -739,6 +817,50 @@ class BattleMapWidget(QWidget):
             visible_squares.append((gx, gy))
         return visible_squares
 
+    def _player_hidden_token_blocked_move_anchors(
+        self,
+        footprint_w: int = 1,
+        footprint_h: int = 1,
+        ignore_token_index: Optional[int] = None,
+    ) -> set[tuple[int, int]]:
+        cosmetic_anchors: set[tuple[int, int]] = set()
+        if not self._full_manual_mode or not self._map_pixmap or self._map_pixmap.isNull() or self.grid_size_px <= 0:
+            return cosmetic_anchors
+
+        width, height = self._normalize_token_footprint(footprint_w, footprint_h)
+        max_anchor_x = int(self._map_pixmap.width() // self.grid_size_px) + 1
+        max_anchor_y = int(self._map_pixmap.height() // self.grid_size_px) + 1
+        hidden_token_cells_by_index: dict[int, set[tuple[int, int]]] = {}
+        visible_token_cells_by_index: dict[int, set[tuple[int, int]]] = {}
+
+        for token_index, token in enumerate(self.tokens_on_map):
+            if token_index == ignore_token_index or not isinstance(token, dict):
+                continue
+            token_cells = self._get_token_occupied_cells(token)
+            if self._token_hidden_from_player_view(token):
+                hidden_token_cells_by_index[token_index] = token_cells
+            else:
+                visible_token_cells_by_index[token_index] = token_cells
+
+        if not hidden_token_cells_by_index:
+            return cosmetic_anchors
+
+        hidden_cells = set().union(*hidden_token_cells_by_index.values())
+        visible_cells = set().union(*visible_token_cells_by_index.values()) if visible_token_cells_by_index else set()
+
+        for gx in range(-1, max_anchor_x + 1):
+            for gy in range(-1, max_anchor_y + 1):
+                anchor = (gx, gy)
+                if not self._is_anchor_footprint_within_map(anchor, width, height):
+                    continue
+                candidate_cells = set(self._iter_footprint_cells(anchor, width, height))
+                if not candidate_cells.intersection(hidden_cells):
+                    continue
+                if candidate_cells.intersection(visible_cells):
+                    continue
+                cosmetic_anchors.add(anchor)
+        return cosmetic_anchors
+
     def _get_token_footprint(self, token_data: dict[str, Any]) -> tuple[int, int]:
         return self._normalize_token_footprint(
             token_data.get("footprint_w"),
@@ -788,6 +910,7 @@ class BattleMapWidget(QWidget):
         footprint_w: int,
         footprint_h: Optional[int] = None,
         ignore_token_index: Optional[int] = None,
+        ignore_player_hidden_tokens: bool = False,
     ) -> Optional[int]:
         width, height = self._normalize_token_footprint(
             footprint_w,
@@ -797,6 +920,8 @@ class BattleMapWidget(QWidget):
         candidate_cells = set(self._iter_footprint_cells(grid_pos, width, height))
         for idx, token in enumerate(self.tokens_on_map):
             if idx == ignore_token_index or not isinstance(token, dict):
+                continue
+            if ignore_player_hidden_tokens and self._token_hidden_from_player_view(token):
                 continue
             if candidate_cells.intersection(self._get_token_occupied_cells(token)):
                 return idx
@@ -808,6 +933,7 @@ class BattleMapWidget(QWidget):
         footprint_w: int,
         footprint_h: Optional[int] = None,
         ignore_token_index: Optional[int] = None,
+        ignore_player_hidden_tokens: bool = False,
     ) -> tuple[bool, str]:
         width, height = self._normalize_token_footprint(
             footprint_w,
@@ -816,7 +942,13 @@ class BattleMapWidget(QWidget):
         )
         if not self._is_anchor_footprint_within_map(grid_pos, width, height):
             return False, f"footprint {width}x{height} at {grid_pos} extends off-map"
-        overlap_index = self._find_footprint_overlap_token_index(grid_pos, width, height, ignore_token_index=ignore_token_index)
+        overlap_index = self._find_footprint_overlap_token_index(
+            grid_pos,
+            width,
+            height,
+            ignore_token_index=ignore_token_index,
+            ignore_player_hidden_tokens=ignore_player_hidden_tokens,
+        )
         if overlap_index is not None:
             other = self.tokens_on_map[overlap_index]
             other_name = self._clean_token_name(other.get("name", "Token")) if isinstance(other, dict) else "token"
@@ -906,6 +1038,10 @@ class BattleMapWidget(QWidget):
 
         total_ft = 0
         diagonal_step_count = 0
+        footprint_w = DEFAULT_TOKEN_FOOTPRINT_WIDTH
+        footprint_h = DEFAULT_TOKEN_FOOTPRINT_HEIGHT
+        if self.move_origin_token_index is not None and 0 <= self.move_origin_token_index < len(self.tokens_on_map):
+            footprint_w, footprint_h = self._get_token_footprint(self.tokens_on_map[self.move_origin_token_index])
         for previous, current in zip(path, path[1:]):
             dx = abs(int(current[0]) - int(previous[0]))
             dy = abs(int(current[1]) - int(previous[1]))
@@ -917,7 +1053,30 @@ class BattleMapWidget(QWidget):
                 total_ft += FEET_PER_GRID_SQUARE if diagonal_step_count % 2 == 1 else FEET_PER_GRID_SQUARE * 2
             else:
                 total_ft += FEET_PER_GRID_SQUARE
+            if self._footprint_overlaps_difficult_terrain(current, footprint_w, footprint_h):
+                total_ft += FEET_PER_GRID_SQUARE
         return total_ft
+
+    def _footprint_overlaps_difficult_terrain(
+        self,
+        grid_pos: tuple[int, int],
+        footprint_w: int = 1,
+        footprint_h: int = 1,
+    ) -> bool:
+        if not self.difficult_terrain_squares:
+            return False
+        return any(
+            cell in self.difficult_terrain_squares
+            for cell in self._iter_footprint_cells(grid_pos, footprint_w, footprint_h)
+        )
+
+    def _movement_step_cost_squares(
+        self,
+        destination_grid: tuple[int, int],
+        footprint_w: int = 1,
+        footprint_h: int = 1,
+    ) -> int:
+        return 2 if self._footprint_overlaps_difficult_terrain(destination_grid, footprint_w, footprint_h) else 1
 
     def _draw_movement_count_tooltip(
         self,
@@ -1731,6 +1890,8 @@ class BattleMapWidget(QWidget):
         else:
              self._draw_placeholder(painter, "No Map Loaded")
 
+        self._draw_difficult_terrain_squares(painter)
+
         if self.show_grid and self._map_pixmap and self.grid_size_px > 0:
             self._draw_grid_qt(painter)
             if self.show_grid_labels:
@@ -1825,6 +1986,7 @@ class BattleMapWidget(QWidget):
 
         self._draw_dm_fog_markers(painter)
         self._draw_fog_drag_preview(painter)
+        self._draw_difficult_terrain_drag_preview(painter)
 
         if (
             self.is_selecting_move_target
@@ -1920,7 +2082,8 @@ class BattleMapWidget(QWidget):
 
         font = painter.font()
         original_size = font.pointSizeF()
-        font.setPointSizeF(max(4.5 / self._zoom_level, min(self.grid_size_px * 0.16, 7.0 / self._zoom_level)))
+        screen_font_size = max(8.5, min(self.grid_size_px * self._zoom_level * 0.16, 11.0))
+        font.setPointSizeF(screen_font_size / self._zoom_level)
         font.setBold(True)
         painter.setFont(font)
         metrics = QFontMetrics(font)
@@ -2003,6 +2166,49 @@ class BattleMapWidget(QWidget):
         self._all_fog_texture = texture if not texture.isNull() else None
         return self._all_fog_texture
 
+    def _draw_difficult_terrain_texture(self, painter: QPainter, rect: QRectF, opacity_scale: float = 1.0) -> None:
+        if rect.isEmpty():
+            return
+        alpha_scale = max(0.0, min(1.0, opacity_scale))
+        base = QColor(DEFAULT_DIFFICULT_TERRAIN_COLOR)
+        base.setAlpha(int(62 * alpha_scale))
+        painter.fillRect(rect, base)
+
+        edge_pen = QPen(QColor(245, 226, 160, int(92 * alpha_scale)), max(0.75, rect.width() * 0.028))
+        painter.setPen(edge_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        inset = rect.width() * 0.08
+        painter.drawRect(rect.adjusted(inset, inset, -inset, -inset))
+
+        scar_pen = QPen(QColor(55, 45, 35, int(150 * alpha_scale)), max(1.0, rect.width() * 0.045))
+        scar_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(scar_pen)
+        strokes = (
+            (0.18, 0.72, 0.44, 0.30),
+            (0.42, 0.82, 0.78, 0.48),
+            (0.18, 0.35, 0.36, 0.18),
+            (0.62, 0.28, 0.84, 0.18),
+        )
+        for x1, y1, x2, y2 in strokes:
+            painter.drawLine(QPointF(rect.left() + rect.width() * x1, rect.top() + rect.height() * y1),
+                             QPointF(rect.left() + rect.width() * x2, rect.top() + rect.height() * y2))
+
+        pebble_pen = QPen(QColor(35, 31, 27, int(130 * alpha_scale)), max(0.75, rect.width() * 0.02))
+        pebble_fill = QColor(210, 199, 166, int(102 * alpha_scale))
+        painter.setPen(pebble_pen)
+        painter.setBrush(pebble_fill)
+        pebble_size = max(1.5, rect.width() * 0.07)
+        for px, py, scale in ((0.27, 0.52, 0.9), (0.53, 0.36, 0.7), (0.72, 0.68, 0.8)):
+            center = QPointF(rect.left() + rect.width() * px, rect.top() + rect.height() * py)
+            radius = pebble_size * scale
+            painter.drawEllipse(center, radius, radius * 0.72)
+
+    def _draw_difficult_terrain_squares(self, painter: QPainter) -> None:
+        if self.grid_size_px <= 0 or not self.difficult_terrain_squares:
+            return
+        for cell in self.difficult_terrain_squares:
+            self._draw_difficult_terrain_texture(painter, self._grid_to_map_rect(cell))
+
     def _draw_fog_squares_for_mode(
         self,
         painter: QPainter,
@@ -2068,6 +2274,22 @@ class BattleMapWidget(QWidget):
             preview_color = QColor(self._fog_color)
             preview_color.setAlpha(85)
             pen_color = QColor(255, 255, 255, 170)
+        painter.setPen(QPen(pen_color, max(0.5, 1.5 / max(self._zoom_level, 0.01))))
+        painter.setBrush(preview_color)
+        for cell in preview_cells:
+            painter.drawRect(self._grid_to_map_rect(cell))
+
+    def _draw_difficult_terrain_drag_preview(self, painter: QPainter) -> None:
+        if not self._terrain_add_enabled or self._terrain_drag_start_grid is None or self._terrain_drag_current_grid is None:
+            return
+        preview_cells = set(self._iter_grid_rect_cells(self._terrain_drag_start_grid, self._terrain_drag_current_grid))
+        if self._terrain_drag_mode == "remove":
+            preview_color = QColor(255, 70, 70, 70)
+            pen_color = QColor(255, 70, 70, 210)
+        else:
+            preview_color = QColor(DEFAULT_DIFFICULT_TERRAIN_COLOR)
+            preview_color.setAlpha(88)
+            pen_color = QColor(245, 226, 160, 210)
         painter.setPen(QPen(pen_color, max(0.5, 1.5 / max(self._zoom_level, 0.01))))
         painter.setBrush(preview_color)
         for cell in preview_cells:
@@ -2227,6 +2449,9 @@ class BattleMapWidget(QWidget):
                     "grid_offset_y": int(raw_tier.get("grid_offset_y", 0)),
                     "tokens": [dict(token) for token in raw_tier.get("tokens", []) if isinstance(token, dict)],
                     "fog_squares": self.serialize_fog_squares(self.normalize_fog_squares(raw_tier.get("fog_squares", []))),
+                    "difficult_terrain_squares": self.serialize_difficult_terrain_squares(
+                        self.normalize_difficult_terrain_squares(raw_tier.get("difficult_terrain_squares", []))
+                    ),
                 })
         if not tiers:
             tiers = [{
@@ -2239,6 +2464,9 @@ class BattleMapWidget(QWidget):
                 "grid_offset_y": int(data.get("grid_offset_y", 0)),
                 "tokens": [dict(token) for token in data.get("tokens", []) if isinstance(token, dict)],
                 "fog_squares": self.serialize_fog_squares(self.normalize_fog_squares(data.get("fog_squares", []))),
+                "difficult_terrain_squares": self.serialize_difficult_terrain_squares(
+                    self.normalize_difficult_terrain_squares(data.get("difficult_terrain_squares", []))
+                ),
             }]
         return tiers
 
@@ -2287,6 +2515,7 @@ class BattleMapWidget(QWidget):
         tier["grid_offset_y"] = int(self.grid_offset_y)
         tier["tokens"] = self.tokens_on_map
         tier["fog_squares"] = self.serialize_fog_squares(self.fog_squares)
+        tier["difficult_terrain_squares"] = self.serialize_difficult_terrain_squares(self.difficult_terrain_squares)
 
     def _materialize_tier_tokens(self, tier: dict[str, Any]) -> list[dict[str, Any]]:
         tier_id = str(tier.get("id") or DEFAULT_TIER_ID)
@@ -2477,6 +2706,7 @@ class BattleMapWidget(QWidget):
         self.grid_offset_x = int(tier.get("grid_offset_x", 0))
         self.grid_offset_y = int(tier.get("grid_offset_y", 0))
         self.fog_squares = self.normalize_fog_squares(tier.get("fog_squares", []))
+        self.difficult_terrain_squares = self.normalize_difficult_terrain_squares(tier.get("difficult_terrain_squares", []))
         self.tokens_on_map = self._materialize_tier_tokens(tier)
         for token in self.tokens_on_map:
             if isinstance(token, dict):
@@ -2531,10 +2761,15 @@ class BattleMapWidget(QWidget):
         self._current_round = 1
         self._team_count = 0
         self.fog_squares.clear()
+        self.difficult_terrain_squares.clear()
         self._fog_drag_start_grid = None
         self._fog_drag_current_grid = None
         self._fog_drag_mode = None
         self._fog_runtime_touched = False
+        self._terrain_drag_start_grid = None
+        self._terrain_drag_current_grid = None
+        self._terrain_drag_mode = None
+        self._terrain_runtime_touched = False
         self.log_messages.clear() 
         self._refresh_log_text_from_history(scroll_to_end=False)
         self.highlighted_movement_squares.clear()
@@ -2573,6 +2808,7 @@ class BattleMapWidget(QWidget):
         self.grid_offset_x = active_tier.get("grid_offset_x", 0)
         self.grid_offset_y = active_tier.get("grid_offset_y", 0)
         self.fog_squares = self.normalize_fog_squares(active_tier.get("fog_squares", []))
+        self.difficult_terrain_squares = self.normalize_difficult_terrain_squares(active_tier.get("difficult_terrain_squares", []))
         self._load_map_image(map_path)
         initial_tokens_data = active_tier.get("tokens", [])
         print(f"Applying {len(initial_tokens_data)} initial tokens...")
@@ -2790,6 +3026,7 @@ class BattleMapWidget(QWidget):
                 "grid_offset_y": int(tier.get("grid_offset_y", 0)),
                 "tokens": tier_tokens,
                 "fog_squares": list(tier.get("fog_squares", [])),
+                "difficult_terrain_squares": list(tier.get("difficult_terrain_squares", [])),
             })
         runtime_tokens = active_serialized_tokens or self._serialize_runtime_tokens(self.tokens_on_map)
 
@@ -2821,6 +3058,9 @@ class BattleMapWidget(QWidget):
             "fog_squares": self.serialize_fog_squares(self.fog_squares),
             "_fog_runtime_schema": 1,
             "_fog_runtime_touched": bool(self._fog_runtime_touched),
+            "difficult_terrain_squares": self.serialize_difficult_terrain_squares(self.difficult_terrain_squares),
+            "_terrain_runtime_schema": 1,
+            "_terrain_runtime_touched": bool(self._terrain_runtime_touched),
             "log_messages": list(self.log_messages),
         }
 
@@ -2928,6 +3168,13 @@ class BattleMapWidget(QWidget):
         painter.setClipRect(dest_rect)
         painter.drawPixmap(dest_rect, self._map_pixmap, visible_map_rect)
 
+        painter.save()
+        painter.translate(dest_rect.left(), dest_rect.top())
+        painter.scale(scale_x, scale_y)
+        painter.translate(-visible_left, -visible_top)
+        self._draw_difficult_terrain_squares(painter)
+        painter.restore()
+
         if self.show_grid and self.grid_size_px > 0:
             painter.setPen(QPen(GRID_LINE_COLOR, 1))
             start_grid_x = int(math.floor((visible_left - self.grid_offset_x) / self.grid_size_px)) - 1
@@ -2961,11 +3208,38 @@ class BattleMapWidget(QWidget):
             footprint_h = DEFAULT_TOKEN_FOOTPRINT_HEIGHT
             if self.move_origin_token_index is not None and 0 <= self.move_origin_token_index < len(self.tokens_on_map):
                 footprint_w, footprint_h = self._get_token_footprint(self.tokens_on_map[self.move_origin_token_index])
+            player_movement_squares = set(self.highlighted_movement_squares)
+            if (
+                self.move_origin_token_index is not None
+                and 0 <= self.move_origin_token_index < len(self.tokens_on_map)
+                and self.move_origin_grid_pos is not None
+            ):
+                moving_token = self.tokens_on_map[self.move_origin_token_index]
+                if self._full_manual_mode:
+                    player_movement_squares = self._calculate_all_valid_move_anchors(
+                        self.move_origin_token_index,
+                        ignore_player_hidden_tokens=True,
+                    )
+                else:
+                    player_movement_squares = self._calculate_reachable_squares(
+                        self.move_origin_grid_pos,
+                        int(moving_token.get("speed", 0) or 0),
+                        moving_token_index=self.move_origin_token_index,
+                        ignore_player_hidden_tokens=True,
+                    )
+                player_movement_squares.update(
+                    self._player_hidden_token_blocked_move_anchors(
+                        footprint_w,
+                        footprint_h,
+                        ignore_token_index=self.move_origin_token_index,
+                    )
+                )
             visible_movement_squares = self._filter_player_visible_movement_squares(
-                self.highlighted_movement_squares,
+                player_movement_squares,
                 footprint_w,
                 footprint_h,
             )
+            visible_movement_square_set = set(visible_movement_squares)
             self._draw_movement_squares(
                 painter,
                 visible_movement_squares,
@@ -2973,12 +3247,24 @@ class BattleMapWidget(QWidget):
                 footprint_w=footprint_w,
                 footprint_h=footprint_h,
             )
-            if self.current_highlighted_path:
+            visible_highlighted_path: list[tuple[int, int]] = []
+            if (
+                self.hovered_grid_square
+                and self.hovered_grid_square in visible_movement_square_set
+                and self.move_origin_grid_pos in visible_movement_square_set
+            ):
+                visible_highlighted_path = self._find_path(
+                    self.move_origin_grid_pos,
+                    self.hovered_grid_square,
+                    visible_movement_square_set,
+                )
+            elif self.current_highlighted_path:
                 visible_highlighted_path = self._filter_player_visible_movement_squares(
                     self.current_highlighted_path,
                     footprint_w,
                     footprint_h,
                 )
+            if visible_highlighted_path:
                 self._draw_movement_squares(
                     painter,
                     visible_highlighted_path,
@@ -3073,10 +3359,12 @@ class BattleMapWidget(QWidget):
         old_map_pixmap = self._map_pixmap
         old_tokens = self.tokens_on_map
         old_fog = self.fog_squares
+        old_terrain = self.difficult_terrain_squares
         try:
             self._map_pixmap = cached_pixmap
             self.tokens_on_map = self._materialize_tier_tokens(tier)
             self.fog_squares = self.normalize_fog_squares(tier.get("fog_squares", []))
+            self.difficult_terrain_squares = self.normalize_difficult_terrain_squares(tier.get("difficult_terrain_squares", []))
             return self._render_player_battle_frame(
                 target_size,
                 QRectF(0.0, 0.0, float(cached_pixmap.width()), float(cached_pixmap.height())),
@@ -3086,6 +3374,7 @@ class BattleMapWidget(QWidget):
             self._map_pixmap = old_map_pixmap
             self.tokens_on_map = old_tokens
             self.fog_squares = old_fog
+            self.difficult_terrain_squares = old_terrain
 
     def render_player_follow_camera_frame(
         self,
@@ -3231,6 +3520,10 @@ class BattleMapWidget(QWidget):
             runtime_state["grid_offset_x"] = active_tier.get("grid_offset_x", runtime_state.get("grid_offset_x"))
             runtime_state["grid_offset_y"] = active_tier.get("grid_offset_y", runtime_state.get("grid_offset_y"))
             runtime_state["fog_squares"] = active_tier.get("fog_squares", runtime_state.get("fog_squares", []))
+            runtime_state["difficult_terrain_squares"] = active_tier.get(
+                "difficult_terrain_squares",
+                runtime_state.get("difficult_terrain_squares", []),
+            )
             active_tier_tokens = active_tier.get("tokens", [])
             if active_tier_tokens:
                 runtime_state["tokens"] = active_tier_tokens
@@ -3257,6 +3550,12 @@ class BattleMapWidget(QWidget):
             if raw_runtime_fog or runtime_fog_touched or not self.fog_squares:
                 self.fog_squares = self.normalize_fog_squares(raw_runtime_fog)
             self._fog_runtime_touched = runtime_fog_touched
+        if "difficult_terrain_squares" in runtime_state:
+            raw_runtime_terrain = runtime_state.get("difficult_terrain_squares", [])
+            runtime_terrain_touched = bool(runtime_state.get("_terrain_runtime_touched", False))
+            if raw_runtime_terrain or runtime_terrain_touched or not self.difficult_terrain_squares:
+                self.difficult_terrain_squares = self.normalize_difficult_terrain_squares(raw_runtime_terrain)
+            self._terrain_runtime_touched = runtime_terrain_touched
         self._team_count = max(0, min(8, to_int(runtime_state.get("team_count"), 0)))
         if "full_manual_mode" in runtime_state:
             self.set_full_manual_mode(bool(runtime_state.get("full_manual_mode", False)), emit_log=False)
@@ -4687,6 +4986,28 @@ class BattleMapWidget(QWidget):
                 event.accept()
                 return
 
+        if self._terrain_add_enabled and not self.is_animating_move:
+            grid_coords = self._map_to_grid_pos(map_pos)
+            if grid_coords is None:
+                event.accept()
+                return
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._terrain_drag_start_grid = grid_coords
+                self._terrain_drag_current_grid = grid_coords
+                self._terrain_drag_mode = "paint"
+                self.setCursor(Qt.CursorShape.CrossCursor)
+                self.update()
+                event.accept()
+                return
+            if event.button() == Qt.MouseButton.RightButton:
+                self._terrain_drag_start_grid = grid_coords
+                self._terrain_drag_current_grid = grid_coords
+                self._terrain_drag_mode = "remove"
+                self.setCursor(Qt.CursorShape.CrossCursor)
+                self.update()
+                event.accept()
+                return
+
         if self._generated_token_placement_request and not self.is_animating_move:
             if event.button() == Qt.MouseButton.RightButton:
                 self._generated_token_placement_request = None
@@ -4880,6 +5201,19 @@ class BattleMapWidget(QWidget):
                 event.accept()
                 return
             if (
+                self._terrain_add_enabled
+                and self._terrain_drag_start_grid is not None
+                and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton))
+                and not self.is_animating_move
+            ):
+                map_pos = self._widget_to_map_pos(widget_pos)
+                grid_coords = self._map_to_grid_pos(map_pos)
+                if grid_coords is not None and grid_coords != self._terrain_drag_current_grid:
+                    self._terrain_drag_current_grid = grid_coords
+                    self.update()
+                event.accept()
+                return
+            if (
                 self._pending_token_move_drag_index is not None
                 and self._pending_token_move_drag_start_widget_pos is not None
                 and (event.buttons() & Qt.MouseButton.LeftButton)
@@ -4925,7 +5259,7 @@ class BattleMapWidget(QWidget):
                 event.accept()
                 return
             else:
-                if self._fog_add_enabled:
+                if self._fog_add_enabled or self._terrain_add_enabled:
                      if self.cursor().shape() != Qt.CursorShape.CrossCursor:
                           self.setCursor(Qt.CursorShape.CrossCursor)
                 elif not self.panning and not self._is_in_any_selection_mode() and not self._generated_token_placement_request:
@@ -4964,6 +5298,28 @@ class BattleMapWidget(QWidget):
             event.accept()
             return
         if (
+            event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton)
+            and self._terrain_add_enabled
+            and self._terrain_drag_start_grid is not None
+            and not self.is_animating_move
+        ):
+            widget_pos = event.position()
+            map_pos = self._widget_to_map_pos(widget_pos)
+            end_grid = self._map_to_grid_pos(map_pos) or self._terrain_drag_current_grid or self._terrain_drag_start_grid
+            if self._terrain_drag_mode == "remove":
+                changed = self._remove_difficult_terrain_rect(self._terrain_drag_start_grid, end_grid)
+            else:
+                changed = self._paint_difficult_terrain_rect(self._terrain_drag_start_grid, end_grid)
+            self._terrain_drag_start_grid = None
+            self._terrain_drag_current_grid = None
+            self._terrain_drag_mode = None
+            if changed:
+                self._emit_difficult_terrain_changed()
+            else:
+                self.update()
+            event.accept()
+            return
+        if (
             event.button() == Qt.MouseButton.LeftButton
             and self._drag_move_selection_active
             and self.is_selecting_move_target
@@ -4996,7 +5352,7 @@ class BattleMapWidget(QWidget):
         if self.is_animating_move:
             event.ignore()
             return
-        if self._fog_add_enabled:
+        if self._fog_add_enabled or self._terrain_add_enabled:
             event.accept()
             return
         if self._generated_token_placement_request:
@@ -6972,7 +7328,11 @@ class BattleMapWidget(QWidget):
             f"{token_name} rotates to {logged_width}x{logged_height} at {chosen_anchor}."
         )
 
-    def _calculate_all_valid_move_anchors(self, moving_token_index: int) -> set[tuple[int, int]]:
+    def _calculate_all_valid_move_anchors(
+        self,
+        moving_token_index: int,
+        ignore_player_hidden_tokens: bool = False,
+    ) -> set[tuple[int, int]]:
         reachable: set[tuple[int, int]] = set()
         if not self._map_pixmap or self._map_pixmap.isNull() or self.grid_size_px <= 0:
             return reachable
@@ -6988,6 +7348,7 @@ class BattleMapWidget(QWidget):
                     mover_width,
                     mover_height,
                     ignore_token_index=moving_token_index,
+                    ignore_player_hidden_tokens=ignore_player_hidden_tokens,
                 )
                 if can_place:
                     reachable.add((gx, gy))
@@ -6998,6 +7359,7 @@ class BattleMapWidget(QWidget):
         start_grid_pos: tuple[int, int],
         speed_ft: int,
         moving_token_index: Optional[int] = None,
+        ignore_player_hidden_tokens: bool = False,
     ) -> set[tuple[int, int]]:
         reachable = set(); 
         if speed_ft <= 0 or self.grid_size_px <= 0: return reachable 
@@ -7015,10 +7377,15 @@ class BattleMapWidget(QWidget):
             for dx in [-1, 0, 1]:
                 for dy in [-1, 0, 1]:
                     if dx == 0 and dy == 0: continue 
-                    nx, ny = cx + dx, cy + dy; npos = (nx, ny); cost = 1; ndist = cdist + cost
+                    nx, ny = cx + dx, cy + dy; npos = (nx, ny)
+                    ndist = cdist + self._movement_step_cost_squares(npos, mover_width, mover_height)
                     if ndist <= max_distance_sq:
                         can_place, _reason = self._validate_token_anchor_position(
-                            npos, mover_width, mover_height, ignore_token_index=moving_token_index
+                            npos,
+                            mover_width,
+                            mover_height,
+                            ignore_token_index=moving_token_index,
+                            ignore_player_hidden_tokens=ignore_player_hidden_tokens,
                         )
                         if can_place and (npos not in visited or ndist < visited[npos]):
                             visited[npos] = ndist; reachable.add(npos); queue.append((nx, ny, ndist)) 
@@ -7030,6 +7397,10 @@ class BattleMapWidget(QWidget):
     def _find_path(self, start_grid_pos: tuple[int, int], end_grid_pos: tuple[int, int], allowed_squares: set) -> list[tuple[int, int]]:
         if start_grid_pos == end_grid_pos: return [start_grid_pos]
         if start_grid_pos not in allowed_squares or end_grid_pos not in allowed_squares: return [] 
+        footprint_w = DEFAULT_TOKEN_FOOTPRINT_WIDTH
+        footprint_h = DEFAULT_TOKEN_FOOTPRINT_HEIGHT
+        if self.move_origin_token_index is not None and 0 <= self.move_origin_token_index < len(self.tokens_on_map):
+            footprint_w, footprint_h = self._get_token_footprint(self.tokens_on_map[self.move_origin_token_index])
         frontier = [(0 + self._heuristic(start_grid_pos, end_grid_pos), 0, start_grid_pos)]; heapq.heapify(frontier) 
         came_from = {start_grid_pos: None}; cost_so_far = {start_grid_pos: 0}; path_found = False
         while frontier:
@@ -7042,7 +7413,7 @@ class BattleMapWidget(QWidget):
                     if dx == 0 and dy == 0: continue 
                     neighbor_pos = (cx + dx, cy + dy)
                     if neighbor_pos in allowed_squares:
-                        new_cost = current_g + 1
+                        new_cost = current_g + self._movement_step_cost_squares(neighbor_pos, footprint_w, footprint_h)
                         if neighbor_pos not in cost_so_far or new_cost < cost_so_far[neighbor_pos]:
                             cost_so_far[neighbor_pos] = new_cost; h_cost = self._heuristic(neighbor_pos, end_grid_pos)
                             f_cost = new_cost + h_cost; heapq.heappush(frontier, (f_cost, new_cost, neighbor_pos)); came_from[neighbor_pos] = current_pos 

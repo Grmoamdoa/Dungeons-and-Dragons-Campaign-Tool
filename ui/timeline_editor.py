@@ -1551,6 +1551,7 @@ class TimelineEditorWidget(QWidget):
             clip_data.setdefault("grid_size", DEFAULT_GRID_SIZE); clip_data.setdefault("grid_offset_x", DEFAULT_GRID_OFFSET)
             clip_data.setdefault("grid_offset_y", DEFAULT_GRID_OFFSET); clip_data.setdefault("tokens", [])
             clip_data.setdefault("fog_squares", [])
+            clip_data.setdefault("difficult_terrain_squares", [])
             clip_data.setdefault("active_tier_id", "tier_1")
             clip_data.setdefault("map_tiers", [])
             try:
@@ -1630,7 +1631,7 @@ class TimelineEditorWidget(QWidget):
         return max(max_end_time, 0.01)
 
     def add_encounter_clip(self, name: str, time_seconds: float):
-        clip_data = {"name": name, "track": "Battle", "start_time": time_seconds, "map_path": DEFAULT_MAP_PATH or "", "show_grid": DEFAULT_SHOW_GRID, "grid_size": DEFAULT_GRID_SIZE, "grid_offset_x": DEFAULT_GRID_OFFSET, "grid_offset_y": DEFAULT_GRID_OFFSET, "tokens": []}
+        clip_data = {"name": name, "track": "Battle", "start_time": time_seconds, "map_path": DEFAULT_MAP_PATH or "", "show_grid": DEFAULT_SHOW_GRID, "grid_size": DEFAULT_GRID_SIZE, "grid_offset_x": DEFAULT_GRID_OFFSET, "grid_offset_y": DEFAULT_GRID_OFFSET, "tokens": [], "fog_squares": [], "difficult_terrain_squares": []}
         new_clip_obj = self.add_clip_from_data(clip_data)
         if new_clip_obj: QTimer.singleShot(0, partial(self.apply_snapping, new_clip_obj))
 
@@ -1671,6 +1672,7 @@ class TimelineEditorWidget(QWidget):
                     "grid_offset_y": clip_data.get("grid_offset_y"),
                     "tokens": copy.deepcopy(clip_data.get("tokens", [])),
                     "fog_squares": copy.deepcopy(clip_data.get("fog_squares", [])),
+                    "difficult_terrain_squares": copy.deepcopy(clip_data.get("difficult_terrain_squares", [])),
                     "active_tier_id": clip_data.get("active_tier_id"),
                     "map_tiers": copy.deepcopy(clip_data.get("map_tiers", [])),
                 }
@@ -1687,6 +1689,7 @@ class TimelineEditorWidget(QWidget):
                     "grid_offset_y": clip_data.get("grid_offset_y"),
                     "tokens": copy.deepcopy(clip_data.get("tokens", [])),
                     "fog_squares": copy.deepcopy(clip_data.get("fog_squares", [])),
+                    "difficult_terrain_squares": copy.deepcopy(clip_data.get("difficult_terrain_squares", [])),
                     "active_tier_id": clip_data.get("active_tier_id"),
                     "map_tiers": copy.deepcopy(clip_data.get("map_tiers", [])),
                 }

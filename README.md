@@ -9,7 +9,7 @@ Current MVP status:
 - Presentation mode with operator controls + player-facing output
 - Encounter runtime state persistence
 - Computer-wide configurable hotkeys for top-level menu commands
-- Encounter setup supports multi-stage maps with per-stage tokens and fog/cloud squares
+- Encounter setup supports multi-stage maps with per-stage tokens, fog/cloud squares, and visible difficult terrain squares
 - DM control panel supports multi-select token moves and reserve/active updates
 - DM control panel token list expands up to 10 visible encounter tokens before scrolling
 
@@ -18,8 +18,8 @@ Current MVP status:
 Packaged installers are the recommended way to use the 1.2 release.
 
 Download the latest installer from GitHub Releases in the intended project repository:
-- macOS Apple Silicon: `DND-Campaign-Presenter-1.2.2-macOS.dmg`
-- Windows x64: `DND-Campaign-Presenter-1.2.2-Windows-x64-Setup.exe`
+- macOS Apple Silicon: `DND-Campaign-Presenter-1.2.3-macOS.dmg`
+- Windows x64: `DND-Campaign-Presenter-1.2.3-Windows-x64-Setup.exe`
 
 Unsigned release note:
 - macOS may warn that the app is from an unidentified developer.
@@ -35,7 +35,7 @@ Unsigned release note:
 
 ### Windows
 
-1. Run `DND-Campaign-Presenter-1.2.2-Windows-x64-Setup.exe`.
+1. Run `DND-Campaign-Presenter-1.2.3-Windows-x64-Setup.exe`.
 2. Complete the installer steps.
 3. Launch the app from the Start Menu or desktop shortcut.
 4. If SmartScreen warns on first launch, choose the option to continue if you trust the download source.
@@ -302,9 +302,12 @@ pip install -r requirements.txt
 4. Save project as `.dcp`.
 5. Reload that `.dcp` and confirm clips still work.
 6. If the first timeline scene is an encounter, press Play after reload and confirm its tokens appear without reopening Encounter Setup.
-7. For a multi-stage encounter, confirm stage maps, tokens, and fog/cloud squares survive save/load and player-view rendering.
-8. In a presentation session, select movement for a token hidden by Hide Token fog and confirm the player view does not show the token cursor/path or green movement range.
-9. In battle, add `Invisible` to a token and confirm the DM map shows a translucent `HID` token with coordinates while the player view hides the token and its movement preview; then remove `Invisible` and confirm it returns.
+7. For a multi-stage encounter, confirm stage maps, tokens, fog/cloud squares, and difficult terrain squares survive save/load and player-view rendering.
+8. In a presentation session, select movement for a token hidden by Hide Token fog and confirm the player view does not show the token cursor/path or green movement range; hide a separate token from players and confirm visible-token green range and yellow path previews do not reveal its occupied squares.
+9. Paint difficult terrain in setup and live battle, confirm players can see the terrain texture, tokens render above it, and entering terrain costs an extra 5 ft of movement.
+10. In the DM Live Control Panel, confirm Grid Settings shows fog controls beside the difficult-terrain toggle, and that grid coordinate labels remain readable after zooming into the DM map.
+11. In the DM Live Control Panel, multi-select encounter tokens and confirm `Set Hidden` / `Set Visible` updates player-view visibility for all selected tokens, including mixed visible/hidden selections.
+12. In battle, add `Invisible` to a token and confirm the DM map shows a translucent `HID` token with coordinates while the player view hides the token and its movement preview; then remove `Invisible` and confirm it returns.
 
 ## Known-Good Baseline
 

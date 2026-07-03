@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QWidget,
     QLabel,
     QListWidget,
@@ -26,7 +27,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QColorDialog,
     QAbstractItemView,
-    QApplication,
 )
 
 from .timeline_editor import TimelineEditorWidget
@@ -382,7 +382,9 @@ class DMControlPanelDialog(QDialog):
     initiativeManagerRequested = pyqtSignal()
     movementCountModeChanged = pyqtSignal(str)
     fogToolSettingsChanged = pyqtSignal(bool, str, str)
+    difficultTerrainToolToggled = pyqtSignal(bool)
     battleTokenParticipationChanged = pyqtSignal(list, str)
+    battleTokenVisibilityChanged = pyqtSignal(list, str)
     battleTokenMoveStageRequested = pyqtSignal(list)
 
     def __init__(self, parent=None):
@@ -406,6 +408,7 @@ class DMControlPanelDialog(QDialog):
         self._is_refreshing_battle_tokens_ui = False
         self._is_refreshing_movement_mode_ui = False
         self._fog_color = DEFAULT_FOG_COLOR
+        self._updating_grid_tool_ui = False
 
         main_layout = QVBoxLayout(self)
 
@@ -547,9 +550,18 @@ class DMControlPanelDialog(QDialog):
         session_button_row.addWidget(self.end_encounter_button)
         session_layout.addLayout(session_button_row)
         grid_settings_group = QGroupBox("Grid Settings")
-        grid_settings_layout = QFormLayout(grid_settings_group)
+        grid_settings_layout = QGridLayout(grid_settings_group)
+        grid_settings_layout.setColumnStretch(0, 1)
+        grid_settings_layout.setColumnStretch(1, 1)
+        grid_settings_layout.setHorizontalSpacing(18)
+        grid_settings_layout.setVerticalSpacing(8)
+
+        fog_controls = QWidget(grid_settings_group)
+        fog_layout = QFormLayout(fog_controls)
+        fog_layout.setContentsMargins(0, 0, 0, 0)
+        fog_layout.setSpacing(8)
         self.add_fog_checkbox = QCheckBox()
-        grid_settings_layout.addRow("Add Fog:", self.add_fog_checkbox)
+        fog_layout.addRow("Add Fog:", self.add_fog_checkbox)
         self.fog_mode_combo = QComboBox()
         self.fog_mode_combo.addItem(FOG_MODE_LABELS[FOG_MODE_HIDE_TOKEN], FOG_MODE_HIDE_TOKEN)
         self.fog_mode_combo.addItem(FOG_MODE_LABELS[FOG_MODE_ALL], FOG_MODE_ALL)
@@ -557,9 +569,19 @@ class DMControlPanelDialog(QDialog):
             "QComboBox { background-color: #4b5563; color: #ffffff; border: 1px solid #aeb6bf; padding: 4px 8px; }"
             "QComboBox QAbstractItemView { background-color: #374151; color: #ffffff; selection-background-color: #2563eb; }"
         )
-        grid_settings_layout.addRow("Fog Type:", self.fog_mode_combo)
+        fog_layout.addRow("Fog Type:", self.fog_mode_combo)
         self.fog_color_button = QPushButton("Choose Color")
-        grid_settings_layout.addRow("Fog Color:", self.fog_color_button)
+        fog_layout.addRow("Fog Color:", self.fog_color_button)
+
+        terrain_controls = QWidget(grid_settings_group)
+        terrain_layout = QFormLayout(terrain_controls)
+        terrain_layout.setContentsMargins(0, 0, 0, 0)
+        terrain_layout.setSpacing(8)
+        self.add_difficult_terrain_checkbox = QCheckBox()
+        terrain_layout.addRow("Add Difficult Terrain:", self.add_difficult_terrain_checkbox)
+
+        grid_settings_layout.addWidget(fog_controls, 0, 0)
+        grid_settings_layout.addWidget(terrain_controls, 0, 1, Qt.AlignmentFlag.AlignTop)
         session_layout.addWidget(grid_settings_group)
         controls_layout.addWidget(session_group)
 
@@ -571,8 +593,6 @@ class DMControlPanelDialog(QDialog):
         self.selected_token_location_label = QLabel("Location: --")
         self.selected_token_location_label.setStyleSheet("color: #d7dde7;")
         token_layout.addWidget(self.selected_token_location_label)
-        self.copy_token_location_button = QPushButton("Copy Location")
-        token_layout.addWidget(self.copy_token_location_button)
         self.movement_count_mode_combo = QComboBox()
         self.movement_count_mode_combo.addItem("5e simple diagonals", "5e_simple")
         self.movement_count_mode_combo.addItem("Orthogonal diagonals", "orthogonal")
@@ -591,6 +611,8 @@ class DMControlPanelDialog(QDialog):
         token_layout.addWidget(self.move_stage_button)
         self.edit_token_profile_button = QPushButton("Edit Profile...")
         token_layout.addWidget(self.edit_token_profile_button)
+        self.toggle_visibility_button = QPushButton("Set Hidden")
+        token_layout.addWidget(self.toggle_visibility_button)
         controls_layout.addWidget(token_group)
 
         action_row = QHBoxLayout()
@@ -631,13 +653,14 @@ class DMControlPanelDialog(QDialog):
         self.play_pause_button.clicked.connect(self.playPauseRequested.emit)
         self.end_encounter_button.clicked.connect(self.endEncounterRequested.emit)
         self.add_fog_checkbox.stateChanged.connect(self._handle_fog_tool_settings_changed)
+        self.add_difficult_terrain_checkbox.stateChanged.connect(self._handle_difficult_terrain_tool_changed)
         self.fog_mode_combo.currentIndexChanged.connect(self._handle_fog_tool_settings_changed)
         self.fog_color_button.clicked.connect(self._choose_fog_color)
         self.battle_token_list.tokenSelectionCommitted.connect(self._handle_battle_token_selection_committed)
-        self.copy_token_location_button.clicked.connect(self._copy_selected_token_location)
         self.movement_count_mode_combo.currentIndexChanged.connect(self._handle_movement_count_mode_changed)
         self.manage_initiative_button.clicked.connect(self.initiativeManagerRequested.emit)
         self.toggle_participation_button.clicked.connect(self._handle_toggle_participation_clicked)
+        self.toggle_visibility_button.clicked.connect(self._handle_toggle_visibility_clicked)
         self.move_stage_button.clicked.connect(self._handle_move_stage_clicked)
         self.edit_token_profile_button.clicked.connect(self._handle_edit_token_profile_clicked)
         self.set_session_controls_state(False, False)
@@ -826,10 +849,13 @@ class DMControlPanelDialog(QDialog):
             self.play_pause_button.setEnabled(True)
         self.end_encounter_button.setEnabled(self._in_battle_mode)
         self.add_fog_checkbox.setEnabled(self._in_battle_mode)
+        self.add_difficult_terrain_checkbox.setEnabled(self._in_battle_mode)
         self.fog_mode_combo.setEnabled(self._in_battle_mode)
         self.fog_color_button.setEnabled(self._in_battle_mode)
         if not self._in_battle_mode and self.add_fog_checkbox.isChecked():
             self.add_fog_checkbox.setChecked(False)
+        if not self._in_battle_mode and self.add_difficult_terrain_checkbox.isChecked():
+            self.add_difficult_terrain_checkbox.setChecked(False)
         self._refresh_battle_token_controls()
 
     def set_battle_token_state(
@@ -913,10 +939,29 @@ class DMControlPanelDialog(QDialog):
         self._handle_fog_tool_settings_changed()
 
     def _handle_fog_tool_settings_changed(self) -> None:
+        if self._updating_grid_tool_ui:
+            return
+        if self.add_fog_checkbox.isChecked() and self.add_difficult_terrain_checkbox.isChecked():
+            self._updating_grid_tool_ui = True
+            self.add_difficult_terrain_checkbox.setChecked(False)
+            self._updating_grid_tool_ui = False
+            self.difficultTerrainToolToggled.emit(False)
         self.fogToolSettingsChanged.emit(
             bool(self.add_fog_checkbox.isChecked() and self._in_battle_mode),
             self._current_fog_mode(),
             self._fog_color,
+        )
+
+    def _handle_difficult_terrain_tool_changed(self) -> None:
+        if self._updating_grid_tool_ui:
+            return
+        if self.add_difficult_terrain_checkbox.isChecked() and self.add_fog_checkbox.isChecked():
+            self._updating_grid_tool_ui = True
+            self.add_fog_checkbox.setChecked(False)
+            self._updating_grid_tool_ui = False
+            self.fogToolSettingsChanged.emit(False, self._current_fog_mode(), self._fog_color)
+        self.difficultTerrainToolToggled.emit(
+            bool(self.add_difficult_terrain_checkbox.isChecked() and self._in_battle_mode)
         )
 
     def _normalize_runtime_state(self, runtime_state: dict[str, Any]) -> dict[str, Any]:
@@ -1414,6 +1459,7 @@ class DMControlPanelDialog(QDialog):
     def _refresh_battle_token_action_controls(self) -> None:
         has_selected_token = bool(self._selected_battle_token_ids or self._selected_battle_token_id)
         self.toggle_participation_button.setEnabled(self._in_battle_mode and has_selected_token)
+        self.toggle_visibility_button.setEnabled(self._in_battle_mode and has_selected_token)
         self.move_stage_button.setEnabled(self._in_battle_mode and has_selected_token)
         selected_count = len(self._selected_battle_token_ids)
         self.move_stage_button.setText(
@@ -1430,6 +1476,29 @@ class DMControlPanelDialog(QDialog):
             for token in selected_tokens
         )
         self.toggle_participation_button.setText("Set Active" if all_selected_reserve else "Set Reserve")
+        hidden_count = sum(
+            1
+            for token in selected_tokens
+            if str(token.get("player_visibility", "visible")).strip().lower() == "hidden"
+        )
+        if not selected_tokens:
+            self.toggle_visibility_button.setText("Set Hidden")
+            self.toggle_visibility_button.setStyleSheet("")
+        elif hidden_count == len(selected_tokens):
+            self.toggle_visibility_button.setText("Set Visible")
+            self.toggle_visibility_button.setStyleSheet(
+                "QPushButton { background-color: #7f1d1d; color: #ffffff; border: 1px solid #fecaca; }"
+            )
+        elif hidden_count == 0:
+            self.toggle_visibility_button.setText("Set Hidden")
+            self.toggle_visibility_button.setStyleSheet(
+                "QPushButton { background-color: #14532d; color: #ffffff; border: 1px solid #bbf7d0; }"
+            )
+        else:
+            self.toggle_visibility_button.setText("Set Hidden (Mixed)")
+            self.toggle_visibility_button.setStyleSheet(
+                "QPushButton { background-color: #92400e; color: #ffffff; border: 1px solid #fde68a; }"
+            )
         self.edit_token_profile_button.setEnabled(True)
         self._refresh_selected_token_location()
 
@@ -1450,24 +1519,10 @@ class DMControlPanelDialog(QDialog):
             visibility = str(token.get("player_visibility", "visible")).strip().lower()
             visibility_text = "hidden" if visibility == "hidden" else "visible"
             self.selected_token_location_label.setText(f"Location: {location} ({token_name}, {visibility_text})")
-            self.copy_token_location_button.setEnabled(self._in_battle_mode and location != "--")
         elif len(selected_tokens) > 1:
             self.selected_token_location_label.setText(f"Location: {len(selected_tokens)} tokens selected")
-            self.copy_token_location_button.setEnabled(False)
         else:
             self.selected_token_location_label.setText("Location: --")
-            self.copy_token_location_button.setEnabled(False)
-
-    def _copy_selected_token_location(self) -> None:
-        selected_tokens = self._selected_battle_token_records()
-        if len(selected_tokens) != 1:
-            return
-        token = selected_tokens[0]
-        location = str(token.get("grid_location") or "").strip()
-        if not location:
-            return
-        token_name = str(token.get("name", "Token"))
-        QApplication.clipboard().setText(f"{token_name}: {location}")
 
     def _handle_battle_token_selection_committed(self, selected_id: str, selected_ids: list) -> None:
         if self._is_refreshing_battle_tokens_ui:
@@ -1506,6 +1561,24 @@ class DMControlPanelDialog(QDialog):
         self.battleTokenParticipationChanged.emit(
             selected_ids,
             "active" if all_selected_reserve else "reserve",
+        )
+
+    def _handle_toggle_visibility_clicked(self) -> None:
+        selected_ids = self._ordered_selected_battle_token_ids()
+        if not selected_ids:
+            return
+        selected_tokens = [
+            token
+            for token in self._battle_tokens
+            if str(token.get("id", "")) in selected_ids
+        ]
+        all_selected_hidden = bool(selected_tokens) and all(
+            str(token.get("player_visibility", "visible")).strip().lower() == "hidden"
+            for token in selected_tokens
+        )
+        self.battleTokenVisibilityChanged.emit(
+            selected_ids,
+            "visible" if all_selected_hidden else "hidden",
         )
 
     def _handle_move_stage_clicked(self) -> None:
