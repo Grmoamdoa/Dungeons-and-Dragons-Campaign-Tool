@@ -148,9 +148,10 @@ You build clips in the timeline, trigger encounters from battle markers, then re
     - `Ready Action/Reaction`
     - `Log Custom Action...`
   - `Move Token...`
+  - `Player Visibility` submenu to show or hide a token from the player view while keeping it controllable on the DM map.
   - `Set Status` submenu (including concentration controls)
   - `Death Saves` submenu (when token is unconscious)
-  - `Manage Conditions...` submenu with toggleable condition entries
+  - `Manage Conditions...` submenu with toggleable condition entries. Adding `Invisible` also hides the token from the player view; removing it makes the token visible again.
   - `Notes...` for encounter-only DM notes on that token
   - `Remove Token`
 - Non-square tokens also get `Rotate Token` in the context menu to swap footprint orientation when the rotated footprint still fits.
@@ -164,7 +165,9 @@ You build clips in the timeline, trigger encounters from battle markers, then re
 - `Ready Action/Reaction` is a manual combat toggle/marker on the token's turn (optional for table tracking).
 - Off-turn `Single Target Attack...` can be used manually as a reaction when the token still has a reaction available this round (the tool does not detect triggers; DM/player adjudicates when the trigger happens).
 - Opportunity attack prompts may appear during movement when a hostile token can react; taking one consumes that token's reaction for the round.
-- Active-turn indicator arrow remains visible above the current token for the full turn (including in player view).
+- Hidden player-view tokens stay visible to the DM as translucent tokens with a `HID` badge, and their movement previews are not shown on the player view.
+- Grid-coordinate labels can be toggled from the battle-map background context menu. Selected token coordinates also appear in the DM Live Control Panel for private sharing.
+- Active-turn indicator arrow remains visible above the current visible token for the full turn (including in player view).
 - Status / concentration controls:
   - `Concentration...` starts concentration and asks for a duration (rounds).
   - `End Concentration` clears concentration manually.
@@ -192,6 +195,7 @@ You build clips in the timeline, trigger encounters from battle markers, then re
   - Taking damage can trigger a concentration save prompt (DM adjudicates pass/fail in the prompt).
   - Timed concentration can expire during turn progression.
 - Action resolution dialogs can apply damage/healing, conditions, and optional condition durations.
+- Applying the `Invisible` condition through action resolution hides the target from the player view and logs its grid coordinate for the DM.
 - Death-save actions are available for unconscious status and update persistent logic.
 
 ## 12) Token Profiles and Persistence
@@ -209,7 +213,7 @@ You build clips in the timeline, trigger encounters from battle markers, then re
 ## 13) Saving, Loading, and Portability
 - Default save uses packaged `.dcp` format with manifest plus bundled assets.
 - Legacy plain JSON `.dcp` files are still load-compatible.
-- In-progress encounter runtime state is saved and can be restored (for example: initiative order/current round, team assignments, active conditions and tracked durations, concentration state, reaction/readied-reaction state during combat, and `Full Manual` mode state).
+- In-progress encounter runtime state is saved and can be restored (for example: initiative order/current round, team assignments, active conditions and tracked durations, player visibility, concentration state, reaction/readied-reaction state during combat, and `Full Manual` mode state).
 - Runtime encounter state also preserves placed-token display data such as footprint size, visual fit, and token rotation.
 - If referenced source assets are missing at save time, unresolved paths may remain for troubleshooting.
 

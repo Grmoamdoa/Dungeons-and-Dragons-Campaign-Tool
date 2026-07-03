@@ -132,6 +132,8 @@ DEFAULT_TIER_ID = "tier_1"
 MAX_MAP_TIERS = 12
 COMBAT_PARTICIPATION_ACTIVE = "active"
 COMBAT_PARTICIPATION_RESERVE = "reserve"
+PLAYER_VISIBILITY_VISIBLE = "visible"
+PLAYER_VISIBILITY_HIDDEN = "hidden"
 INITIATIVE_ORDER_WIDTH = 200 # Adjusted for potentially wider status text
 INITIATIVE_ORDER_PADDING = 10
 INITIATIVE_ORDER_BG_COLOR = QColor(0, 0, 0, 170) # Same as log for consistency
@@ -347,6 +349,7 @@ class BattleMapWidget(QWidget):
         self._fog_runtime_touched = False
         self._selected_token_index: Optional[int] = None
         self.show_grid = True
+        self.show_grid_labels = True
         self.grid_size_px = DEFAULT_GRID_SIZE # Grid size in map pixels
         self.grid_offset_x = 0 # Grid origin offset from map origin (map pixels)
         self.grid_offset_y = 0
@@ -684,12 +687,36 @@ class BattleMapWidget(QWidget):
                 return True
         return False
 
+    @staticmethod
+    def normalize_player_visibility(value: Any) -> str:
+        normalized = str(value or PLAYER_VISIBILITY_VISIBLE).strip().lower()
+        if normalized in {"hidden", "hide", "invisible", "player_hidden", "hidden_from_players"}:
+            return PLAYER_VISIBILITY_HIDDEN
+        return PLAYER_VISIBILITY_VISIBLE
+
+    def _token_hidden_from_players(self, token_data: dict[str, Any]) -> bool:
+        return self.normalize_player_visibility(token_data.get("player_visibility")) == PLAYER_VISIBILITY_HIDDEN
+
+    def _token_hidden_from_player_view(self, token_data: dict[str, Any]) -> bool:
+        return self._token_hidden_from_players(token_data) or self._token_overlaps_player_hidden_fog(token_data)
+
+    def _format_grid_square_label(self, grid_x: Any, grid_y: Any) -> str:
+        try:
+            col = int(grid_x) + 1
+            row = int(grid_y) + 1
+        except (TypeError, ValueError):
+            return "C? R?"
+        return f"C{col} R{row}"
+
+    def _format_token_grid_location(self, token_data: dict[str, Any]) -> str:
+        return self._format_grid_square_label(token_data.get("grid_x"), token_data.get("grid_y"))
+
     def _movement_preview_hidden_from_player(self) -> bool:
         if self.move_origin_token_index is None:
             return False
         if not (0 <= self.move_origin_token_index < len(self.tokens_on_map)):
             return False
-        return self._token_overlaps_player_hidden_fog(self.tokens_on_map[self.move_origin_token_index])
+        return self._token_hidden_from_player_view(self.tokens_on_map[self.move_origin_token_index])
 
     def _filter_player_visible_movement_squares(
         self,
@@ -1153,6 +1180,40 @@ class BattleMapWidget(QWidget):
             painter.setFont(badge_font)
             painter.setPen(CONDITION_RING_OVERFLOW_TEXT_COLOR)
             painter.drawText(badge_rect, int(Qt.AlignmentFlag.AlignCenter), f"+{hidden_count}")
+        painter.restore()
+
+    def _draw_player_hidden_token_marker(self, painter: QPainter, rect_on_map: QRectF) -> None:
+        if self._zoom_level <= 0:
+            return
+        painter.save()
+        outline_width = max(1.0 / self._zoom_level, 2.0)
+        outline_pen = QPen(QColor(125, 225, 255, 230), outline_width)
+        outline_pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(outline_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect_on_map.adjusted(outline_width, outline_width, -outline_width, -outline_width))
+
+        font = painter.font()
+        original_size = font.pointSizeF()
+        font.setPointSizeF(max(7.0 / self._zoom_level, min(rect_on_map.height() * 0.16, 10.0 / self._zoom_level)))
+        font.setBold(True)
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        label = "HID"
+        pad_x = max(3.0 / self._zoom_level, rect_on_map.width() * 0.03)
+        pad_y = max(1.5 / self._zoom_level, rect_on_map.height() * 0.02)
+        badge_w = metrics.horizontalAdvance(label) + (pad_x * 2.0)
+        badge_h = metrics.height() + (pad_y * 2.0)
+        badge_rect = QRectF(rect_on_map.right() - badge_w, rect_on_map.top(), badge_w, badge_h)
+        painter.setPen(QPen(QColor(20, 35, 42, 235), max(0.5 / self._zoom_level, 1.0)))
+        painter.setBrush(QColor(155, 235, 255, 218))
+        painter.drawRoundedRect(badge_rect, 3.0 / self._zoom_level, 3.0 / self._zoom_level)
+        painter.setPen(QColor(8, 29, 36, 245))
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, label)
+
+        font.setBold(False)
+        font.setPointSizeF(original_size)
+        painter.setFont(font)
         painter.restore()
 
     def _start_active_turn_indicator(
@@ -1672,6 +1733,8 @@ class BattleMapWidget(QWidget):
 
         if self.show_grid and self._map_pixmap and self.grid_size_px > 0:
             self._draw_grid_qt(painter)
+            if self.show_grid_labels:
+                self._draw_grid_coordinate_labels(painter)
 
         move_preview_footprint = (DEFAULT_TOKEN_FOOTPRINT_WIDTH, DEFAULT_TOKEN_FOOTPRINT_HEIGHT)
         if (
@@ -1719,8 +1782,21 @@ class BattleMapWidget(QWidget):
             for i, token_data in enumerate(self.tokens_on_map):
                 rect_on_map: Optional[QRectF] = token_data.get('rect_on_map')
 
-                if rect_on_map and self._draw_token_pixmap(painter, token_data, rect_on_map):
+                token_drawn = False
+                hidden_from_players = False
+                if rect_on_map:
+                    hidden_from_players = self._token_hidden_from_players(token_data)
+                    if hidden_from_players:
+                        painter.save()
+                        painter.setOpacity(0.48)
+                    token_drawn = self._draw_token_pixmap(painter, token_data, rect_on_map)
+                    if hidden_from_players:
+                        painter.restore()
+
+                if rect_on_map and token_drawn:
                     self._draw_condition_rings(painter, rect_on_map, token_data)
+                    if hidden_from_players:
+                        self._draw_player_hidden_token_marker(painter, rect_on_map)
 
                     painter.setBrush(Qt.BrushStyle.NoBrush)
                     if (self.is_selecting_action_target or self.is_selecting_aoe_origin) and i == self.acting_token_index:
@@ -1827,6 +1903,57 @@ class BattleMapWidget(QWidget):
             line_map_y = gy * self.grid_size_px + self.grid_offset_y
             line = QLineF(visible_map_rect.left(), line_map_y, visible_map_rect.right(), line_map_y)
             painter.drawLine(line)
+
+    def _draw_grid_coordinate_labels(self, painter: QPainter) -> None:
+        if self.grid_size_px <= 0 or self._zoom_level <= 0 or not self._map_pixmap or self._map_pixmap.isNull():
+            return
+        widget_rect = self.rect()
+        map_top_left = self._widget_to_map_pos(widget_rect.topLeft())
+        map_bottom_right = self._widget_to_map_pos(widget_rect.bottomRight())
+        visible_map_rect = QRectF(map_top_left, map_bottom_right)
+        map_bounds = QRectF(0.0, 0.0, float(self._map_pixmap.width()), float(self._map_pixmap.height()))
+
+        start_grid_x = int(math.floor((visible_map_rect.left() - self.grid_offset_x) / self.grid_size_px)) - 1
+        end_grid_x = int(math.ceil((visible_map_rect.right() - self.grid_offset_x) / self.grid_size_px)) + 1
+        start_grid_y = int(math.floor((visible_map_rect.top() - self.grid_offset_y) / self.grid_size_px)) - 1
+        end_grid_y = int(math.ceil((visible_map_rect.bottom() - self.grid_offset_y) / self.grid_size_px)) + 1
+
+        font = painter.font()
+        original_size = font.pointSizeF()
+        font.setPointSizeF(max(4.5 / self._zoom_level, min(self.grid_size_px * 0.16, 7.0 / self._zoom_level)))
+        font.setBold(True)
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        margin = max(1.5 / self._zoom_level, self.grid_size_px * 0.025)
+        pill_h = max(metrics.height() + (1.0 / self._zoom_level), self.grid_size_px * 0.12)
+
+        for gy in range(start_grid_y, end_grid_y + 1):
+            for gx in range(start_grid_x, end_grid_x + 1):
+                cell_rect = self._grid_to_map_rect((gx, gy))
+                if not cell_rect.intersects(map_bounds):
+                    continue
+                label = f"{gx + 1},{gy + 1}"
+                pill_w = min(
+                    cell_rect.width() - (margin * 2.0),
+                    max(metrics.horizontalAdvance(label) + (4.0 / self._zoom_level), self.grid_size_px * 0.22),
+                )
+                if pill_w <= 0:
+                    continue
+                pill_rect = QRectF(
+                    cell_rect.right() - pill_w - margin,
+                    cell_rect.bottom() - pill_h - margin,
+                    pill_w,
+                    pill_h,
+                )
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(40, 44, 50, 112))
+                painter.drawRoundedRect(pill_rect, 2.0 / self._zoom_level, 2.0 / self._zoom_level)
+                painter.setPen(QColor(244, 247, 251, 188))
+                painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, label)
+
+        font.setBold(False)
+        font.setPointSizeF(original_size)
+        painter.setFont(font)
 
     def _draw_fog_texture_in_rect(
         self,
@@ -2216,6 +2343,7 @@ class BattleMapWidget(QWidget):
                 "initiative": initiative,
                 "team_id": raw_token.get("team_id"),
                 "combat_participation": self.normalize_combat_participation(raw_token.get("combat_participation")),
+                "player_visibility": self.normalize_player_visibility(raw_token.get("player_visibility")),
                 "tier_id": tier_id,
                 "tier_name": tier_name,
                 "oa_reaction_used_round": raw_token.get("oa_reaction_used_round"),
@@ -2301,6 +2429,7 @@ class BattleMapWidget(QWidget):
                 "initiative": token.get("initiative"),
                 "team_id": token.get("team_id"),
                 "combat_participation": self.normalize_combat_participation(token.get("combat_participation")),
+                "player_visibility": self.normalize_player_visibility(token.get("player_visibility")),
                 "tier_id": token.get("tier_id"),
                 "oa_reaction_used_round": token.get("oa_reaction_used_round"),
                 "readied_reaction_armed": bool(token.get("readied_reaction_armed", False)),
@@ -2519,6 +2648,7 @@ class BattleMapWidget(QWidget):
                     'visual_fit_mode': visual_fit_mode,
                     'initiative': instance_initiative,
                     'combat_participation': self.normalize_combat_participation(token_instance_info.get('combat_participation')),
+                    'player_visibility': self.normalize_player_visibility(token_instance_info.get('player_visibility')),
                     'tier_id': self._active_tier_id,
                     'tier_name': str(active_tier.get("name") or self._active_tier_id),
                     'team_id': None,
@@ -2623,6 +2753,8 @@ class BattleMapWidget(QWidget):
                 "size_squares": footprint_w if footprint_w == footprint_h else None,
                 "initiative": token.get("initiative"),
                 "team_id": token.get("team_id"),
+                "combat_participation": self.normalize_combat_participation(token.get("combat_participation")),
+                "player_visibility": self.normalize_player_visibility(token.get("player_visibility")),
                 "oa_reaction_used_round": token.get("oa_reaction_used_round"),
                 "readied_reaction_armed": bool(token.get("readied_reaction_armed", False)),
                 "status": token.get("status"),
@@ -2857,7 +2989,7 @@ class BattleMapWidget(QWidget):
             painter.restore()
 
         for token in self.tokens_on_map:
-            if self._token_overlaps_player_hidden_fog(token):
+            if self._token_hidden_from_player_view(token):
                 continue
             token_rect = token.get("rect_on_map")
             if not isinstance(token_rect, QRectF) or token_rect.isNull():
@@ -3248,6 +3380,7 @@ class BattleMapWidget(QWidget):
                     "visual_fit_mode": visual_fit_mode,
                     "initiative": runtime_initiative,
                     "combat_participation": self.normalize_combat_participation(raw_token.get("combat_participation")),
+                    "player_visibility": self.normalize_player_visibility(raw_token.get("player_visibility")),
                     "tier_id": self._active_tier_id,
                     "tier_name": str(self._active_tier().get("name") or self._active_tier_id),
                     "team_id": None,
@@ -3353,6 +3486,10 @@ class BattleMapWidget(QWidget):
                     "initiative": token.get("initiative"),
                     "team_id": token.get("team_id"),
                     "combat_participation": self.normalize_combat_participation(token.get("combat_participation")),
+                    "player_visibility": self.normalize_player_visibility(token.get("player_visibility")),
+                    "grid_x": token.get("grid_x"),
+                    "grid_y": token.get("grid_y"),
+                    "grid_location": self._format_token_grid_location(token),
                     "tier_id": tier_id,
                     "tier_name": tier_names.get(tier_id, str(token.get("tier_name") or tier_id)),
                     "status": str(token.get("status", "alive")),
@@ -3491,6 +3628,23 @@ class BattleMapWidget(QWidget):
         self.logMessageGenerated.emit(
             f"{token_name} is now {'Active' if new_value == COMBAT_PARTICIPATION_ACTIVE else 'Reserve'}."
         )
+        self.tokenDataModified.emit()
+        self.update()
+        return True
+
+    def set_token_player_visibility(self, token_id: str, visibility: str) -> bool:
+        token, _tier_id = self._find_token_by_id_any_tier(token_id)
+        if not token:
+            return False
+        new_value = self.normalize_player_visibility(visibility)
+        if self.normalize_player_visibility(token.get("player_visibility")) == new_value:
+            return False
+        token["player_visibility"] = new_value
+        token_name = self._clean_token_name(token.get("name", "Token"))
+        if new_value == PLAYER_VISIBILITY_HIDDEN:
+            self.logMessageGenerated.emit(f"{token_name} is hidden from the player view at {self._format_token_grid_location(token)}.")
+        else:
+            self.logMessageGenerated.emit(f"{token_name} is visible on the player view.")
         self.tokenDataModified.emit()
         self.update()
         return True
@@ -4399,6 +4553,7 @@ class BattleMapWidget(QWidget):
             'visual_fit_mode': visual_fit_mode,
             'initiative': initiative_value,
             'combat_participation': COMBAT_PARTICIPATION_RESERVE if self._combat_active else COMBAT_PARTICIPATION_ACTIVE,
+            'player_visibility': PLAYER_VISIBILITY_VISIBLE,
             'tier_id': self._active_tier_id,
             'tier_name': str(self._active_tier().get("name") or self._active_tier_id),
             'oa_reaction_used_round': None,
@@ -4894,6 +5049,9 @@ class BattleMapWidget(QWidget):
                 info_parts.append(f"Cond: {', '.join(cond_abbrs_info)}")
             if self._token_has_concentration(token_data):
                 info_parts.append(f"Conc: {int(token_data.get('concentration_rounds_remaining', 0))}r")
+            info_parts.append(f"Loc: {self._format_token_grid_location(token_data)}")
+            if self._token_hidden_from_players(token_data):
+                info_parts.append("Player View: Hidden")
 
 
             info_str = ", ".join(info_parts) 
@@ -4954,6 +5112,25 @@ class BattleMapWidget(QWidget):
                 rotate_act = QAction("Rotate Token", self)
                 rotate_act.triggered.connect(partial(self._handle_rotate_token, clicked_token_index))
                 menu.addAction(rotate_act)
+
+            visibility_menu = menu.addMenu("Player Visibility")
+            self._apply_context_menu_style(visibility_menu)
+            token_id = str(token_data.get("id", ""))
+            currently_hidden = self._token_hidden_from_players(token_data)
+            visible_to_players_act = QAction("Visible to Players", self)
+            visible_to_players_act.setCheckable(True)
+            visible_to_players_act.setChecked(not currently_hidden)
+            visible_to_players_act.triggered.connect(
+                partial(self.set_token_player_visibility, token_id, PLAYER_VISIBILITY_VISIBLE)
+            )
+            hidden_from_players_act = QAction("Hidden from Players", self)
+            hidden_from_players_act.setCheckable(True)
+            hidden_from_players_act.setChecked(currently_hidden)
+            hidden_from_players_act.triggered.connect(
+                partial(self.set_token_player_visibility, token_id, PLAYER_VISIBILITY_HIDDEN)
+            )
+            visibility_menu.addAction(visible_to_players_act)
+            visibility_menu.addAction(hidden_from_players_act)
 
             status_menu = menu.addMenu("Set Status")
             self._apply_context_menu_style(status_menu)
@@ -5070,6 +5247,11 @@ class BattleMapWidget(QWidget):
             fit_view_act = QAction("Fit View", self)
             fit_view_act.triggered.connect(self._zoom_to_fit_height)
             menu.addAction(fit_view_act)
+            grid_labels_act = QAction("Show Grid Coordinates", self)
+            grid_labels_act.setCheckable(True)
+            grid_labels_act.setChecked(bool(self.show_grid_labels))
+            grid_labels_act.triggered.connect(self._set_grid_coordinate_labels_visible)
+            menu.addAction(grid_labels_act)
 
         menu.exec(event.globalPos())
 
@@ -5101,6 +5283,10 @@ class BattleMapWidget(QWidget):
             "background: #2f2f2f;"
             "}"
         )
+
+    def _set_grid_coordinate_labels_visible(self, checked: bool) -> None:
+        self.show_grid_labels = bool(checked)
+        self.update()
 
     # --- Phase 4: New Method _handle_toggle_condition ---
     
@@ -5137,6 +5323,11 @@ class BattleMapWidget(QWidget):
                 condition_actually_changed = True
                 print(f"    SUCCESS: ADDED '{condition_name}'. 'active_conditions' set is now: {active_conditions_set}")
                 self.logMessageGenerated.emit(f"Condition Added: {token_name} is now {condition_name}.")
+                if condition_name == "Invisible" and not self._token_hidden_from_players(token_data):
+                    token_data["player_visibility"] = PLAYER_VISIBILITY_HIDDEN
+                    self.logMessageGenerated.emit(
+                        f"{token_name} is hidden from the player view at {self._format_token_grid_location(token_data)}."
+                    )
                 if condition_name in CONCENTRATION_BREAK_CONDITIONS:
                     break_reason = self._concentration_break_reason_from_conditions({condition_name})
                     if break_reason:
@@ -5156,6 +5347,9 @@ class BattleMapWidget(QWidget):
                 condition_actually_changed = True
                 print(f"    SUCCESS: REMOVED '{condition_name}'. 'active_conditions' set is now: {active_conditions_set}")
                 log_message_base = f"Condition Removed: {token_name} is no longer {condition_name}."
+                if condition_name == "Invisible" and self._token_hidden_from_players(token_data):
+                    token_data["player_visibility"] = PLAYER_VISIBILITY_VISIBLE
+                    self.logMessageGenerated.emit(f"{token_name} is visible on the player view.")
                 
                 if condition_name == "Unconscious":
                     current_hp = token_data.get('hp', 0)
@@ -6170,6 +6364,11 @@ class BattleMapWidget(QWidget):
                         break_reason = self._concentration_break_reason_from_conditions(concentration_breaking_conditions)
                         if break_reason:
                             self._end_concentration(target_index, break_reason)
+                    if "Invisible" in newly_added_conditions and not self._token_hidden_from_players(target_token_data):
+                        target_token_data["player_visibility"] = PLAYER_VISIBILITY_HIDDEN
+                        self.logMessageGenerated.emit(
+                            f"{target_name} is hidden from the player view at {self._format_token_grid_location(target_token_data)}."
+                        )
                     if "Unconscious" in newly_added_conditions:
                         self.logMessageGenerated.emit(f"Note: '{target_name}' received 'Unconscious' condition, ensuring status sync.")
                         self._handle_set_token_status(target_index, "unconscious")

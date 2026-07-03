@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QColorDialog,
     QAbstractItemView,
+    QApplication,
 )
 
 from .timeline_editor import TimelineEditorWidget
@@ -567,6 +568,11 @@ class DMControlPanelDialog(QDialog):
         self.battle_token_list = BattleTokenListWidget()
         self.battle_token_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
         token_layout.addWidget(self.battle_token_list)
+        self.selected_token_location_label = QLabel("Location: --")
+        self.selected_token_location_label.setStyleSheet("color: #d7dde7;")
+        token_layout.addWidget(self.selected_token_location_label)
+        self.copy_token_location_button = QPushButton("Copy Location")
+        token_layout.addWidget(self.copy_token_location_button)
         self.movement_count_mode_combo = QComboBox()
         self.movement_count_mode_combo.addItem("5e simple diagonals", "5e_simple")
         self.movement_count_mode_combo.addItem("Orthogonal diagonals", "orthogonal")
@@ -628,6 +634,7 @@ class DMControlPanelDialog(QDialog):
         self.fog_mode_combo.currentIndexChanged.connect(self._handle_fog_tool_settings_changed)
         self.fog_color_button.clicked.connect(self._choose_fog_color)
         self.battle_token_list.tokenSelectionCommitted.connect(self._handle_battle_token_selection_committed)
+        self.copy_token_location_button.clicked.connect(self._copy_selected_token_location)
         self.movement_count_mode_combo.currentIndexChanged.connect(self._handle_movement_count_mode_changed)
         self.manage_initiative_button.clicked.connect(self.initiativeManagerRequested.emit)
         self.toggle_participation_button.clicked.connect(self._handle_toggle_participation_clicked)
@@ -845,6 +852,10 @@ class DMControlPanelDialog(QDialog):
                     "max_hp": token.get("max_hp"),
                     "initiative": token.get("initiative"),
                     "combat_participation": str(token.get("combat_participation", "active")),
+                    "player_visibility": str(token.get("player_visibility", "visible")),
+                    "grid_location": str(token.get("grid_location", "")),
+                    "grid_x": token.get("grid_x"),
+                    "grid_y": token.get("grid_y"),
                     "tier_id": str(token.get("tier_id", "")),
                     "tier_name": str(token.get("tier_name", "")),
                     "status": str(token.get("status", "alive")),
@@ -1357,7 +1368,13 @@ class DMControlPanelDialog(QDialog):
             tier_name = str(token.get("tier_name") or "Stage")
             participation = str(token.get("combat_participation", "active")).strip().lower()
             participation_text = "Reserve" if participation == "reserve" else "Active"
-            item = QListWidgetItem(f"{token_name} | {tier_name} | {participation_text} | HP {hp}/{max_hp} | Init {initiative_text} | {status_text}")
+            visibility = str(token.get("player_visibility", "visible")).strip().lower()
+            visibility_text = "Hidden" if visibility == "hidden" else "Visible"
+            location_text = str(token.get("grid_location") or "").strip()
+            location_segment = f" | {location_text}" if location_text else ""
+            item = QListWidgetItem(
+                f"{token_name}{location_segment} | {visibility_text} | {tier_name} | {participation_text} | HP {hp}/{max_hp} | Init {initiative_text} | {status_text}"
+            )
             item.setData(Qt.ItemDataRole.UserRole, token_id)
             self.battle_token_list.addItem(item)
             if token_id in self._selected_battle_token_ids or token_id == self._selected_battle_token_id:
@@ -1375,6 +1392,7 @@ class DMControlPanelDialog(QDialog):
         self.battle_token_list.setEnabled(should_enable_list)
         self.manage_initiative_button.setEnabled(self._in_battle_mode)
         self._refresh_battle_token_action_controls()
+        self._refresh_selected_token_location()
         self._is_refreshing_battle_tokens_ui = False
 
     def _resize_battle_token_list_to_visible_rows(self) -> None:
@@ -1413,6 +1431,43 @@ class DMControlPanelDialog(QDialog):
         )
         self.toggle_participation_button.setText("Set Active" if all_selected_reserve else "Set Reserve")
         self.edit_token_profile_button.setEnabled(True)
+        self._refresh_selected_token_location()
+
+    def _selected_battle_token_records(self) -> list[dict[str, Any]]:
+        selected_ids = self._ordered_selected_battle_token_ids()
+        return [
+            token
+            for token in self._battle_tokens
+            if str(token.get("id", "")) in selected_ids
+        ]
+
+    def _refresh_selected_token_location(self) -> None:
+        selected_tokens = self._selected_battle_token_records()
+        if len(selected_tokens) == 1:
+            token = selected_tokens[0]
+            token_name = str(token.get("name", "Token"))
+            location = str(token.get("grid_location") or "").strip() or "--"
+            visibility = str(token.get("player_visibility", "visible")).strip().lower()
+            visibility_text = "hidden" if visibility == "hidden" else "visible"
+            self.selected_token_location_label.setText(f"Location: {location} ({token_name}, {visibility_text})")
+            self.copy_token_location_button.setEnabled(self._in_battle_mode and location != "--")
+        elif len(selected_tokens) > 1:
+            self.selected_token_location_label.setText(f"Location: {len(selected_tokens)} tokens selected")
+            self.copy_token_location_button.setEnabled(False)
+        else:
+            self.selected_token_location_label.setText("Location: --")
+            self.copy_token_location_button.setEnabled(False)
+
+    def _copy_selected_token_location(self) -> None:
+        selected_tokens = self._selected_battle_token_records()
+        if len(selected_tokens) != 1:
+            return
+        token = selected_tokens[0]
+        location = str(token.get("grid_location") or "").strip()
+        if not location:
+            return
+        token_name = str(token.get("name", "Token"))
+        QApplication.clipboard().setText(f"{token_name}: {location}")
 
     def _handle_battle_token_selection_committed(self, selected_id: str, selected_ids: list) -> None:
         if self._is_refreshing_battle_tokens_ui:

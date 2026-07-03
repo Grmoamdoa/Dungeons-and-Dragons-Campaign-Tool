@@ -29,20 +29,20 @@ Run these from the project root.
 ### macOS
 
 ```bash
-./packaging/build_macos.sh 1.1.0
+./packaging/build_macos.sh 1.2.2
 ```
 
 Output:
-- `packaging/output/DND-Campaign-Presenter-1.1.0-macOS.dmg`
+- `packaging/output/DND-Campaign-Presenter-1.2.2-macOS.dmg`
 
 ### Windows
 
 ```powershell
-.\packaging\build_windows.ps1 -Version 1.1.0
+.\packaging\build_windows.ps1 -Version 1.2.2
 ```
 
 Output:
-- `packaging/output/DND-Campaign-Presenter-1.1.0-Windows-x64-Setup.exe`
+- `packaging/output/DND-Campaign-Presenter-1.2.2-Windows-x64-Setup.exe`
 
 Important:
 - Upload the installer from `packaging\output`, not the app executable from `dist`.
@@ -56,11 +56,11 @@ Correct examples:
 
 ```powershell
 cd "C:\path\to\Dungeons-and-Dragons-Campaign-Tool-main"
-.\packaging\build_windows.ps1 -Version 1.1.0
+.\packaging\build_windows.ps1 -Version 1.2.2
 ```
 
 ```powershell
-cd "C:\path\to\Dungeons-and-Dragons-Campaign-Tool-main"; .\packaging\build_windows.ps1 -Version 1.1.0
+cd "C:\path\to\Dungeons-and-Dragons-Campaign-Tool-main"; .\packaging\build_windows.ps1 -Version 1.2.2
 ```
 
 ## What the Build Scripts Do

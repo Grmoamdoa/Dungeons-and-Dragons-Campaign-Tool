@@ -15,11 +15,11 @@ Current MVP status:
 
 ## Install Packaged App
 
-Packaged installers are the recommended way to use the 1.1 release.
+Packaged installers are the recommended way to use the 1.2 release.
 
 Download the latest installer from GitHub Releases in the intended project repository:
-- macOS Apple Silicon: `DND-Campaign-Presenter-1.1.0-macOS.dmg`
-- Windows x64: `DND-Campaign-Presenter-1.1.0-Windows-x64-Setup.exe`
+- macOS Apple Silicon: `DND-Campaign-Presenter-1.2.2-macOS.dmg`
+- Windows x64: `DND-Campaign-Presenter-1.2.2-Windows-x64-Setup.exe`
 
 Unsigned release note:
 - macOS may warn that the app is from an unidentified developer.
@@ -35,7 +35,7 @@ Unsigned release note:
 
 ### Windows
 
-1. Run `DND-Campaign-Presenter-1.1.0-Windows-x64-Setup.exe`.
+1. Run `DND-Campaign-Presenter-1.2.2-Windows-x64-Setup.exe`.
 2. Complete the installer steps.
 3. Launch the app from the Start Menu or desktop shortcut.
 4. If SmartScreen warns on first launch, choose the option to continue if you trust the download source.
@@ -304,6 +304,7 @@ pip install -r requirements.txt
 6. If the first timeline scene is an encounter, press Play after reload and confirm its tokens appear without reopening Encounter Setup.
 7. For a multi-stage encounter, confirm stage maps, tokens, and fog/cloud squares survive save/load and player-view rendering.
 8. In a presentation session, select movement for a token hidden by Hide Token fog and confirm the player view does not show the token cursor/path or green movement range.
+9. In battle, add `Invisible` to a token and confirm the DM map shows a translucent `HID` token with coordinates while the player view hides the token and its movement preview; then remove `Invisible` and confirm it returns.
 
 ## Known-Good Baseline
 

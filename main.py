@@ -26,7 +26,7 @@ if __name__ == "__main__":
     
     # It's good practice to set application name and version if not done elsewhere
     app.setApplicationName("D&D Campaign Presenter")
-    app.setApplicationVersion("1.1.0")
+    app.setApplicationVersion("1.2.2")
 
     main_window = MainWindow(audio_startup_error=mixer_init_error)
     main_window.show()

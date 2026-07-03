@@ -10,7 +10,7 @@ from PyInstaller.utils.hooks import collect_dynamic_libs
 spec_dir = Path(SPECPATH).resolve()
 project_root = spec_dir.parent.parent
 app_name = "DND Campaign Presenter"
-app_version = os.environ.get("APP_VERSION", "1.1.0")
+app_version = os.environ.get("APP_VERSION", "1.2.2")
 
 pygame_binaries = collect_dynamic_libs("pygame")
 
