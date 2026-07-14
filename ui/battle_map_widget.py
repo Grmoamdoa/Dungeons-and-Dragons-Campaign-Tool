@@ -134,6 +134,18 @@ COMBAT_PARTICIPATION_ACTIVE = "active"
 COMBAT_PARTICIPATION_RESERVE = "reserve"
 PLAYER_VISIBILITY_VISIBLE = "visible"
 PLAYER_VISIBILITY_HIDDEN = "hidden"
+MANUAL_CONTROL_INITIATIVE = "initiative"
+MANUAL_CONTROL_TURNS = "turn_enforcement"
+MANUAL_CONTROL_MOVEMENT = "movement_rules"
+MANUAL_CONTROL_ACTIONS = "action_restrictions"
+MANUAL_CONTROL_AUTOMATIONS = "combat_automations"
+MANUAL_CONTROL_IDS = (
+    MANUAL_CONTROL_INITIATIVE,
+    MANUAL_CONTROL_TURNS,
+    MANUAL_CONTROL_MOVEMENT,
+    MANUAL_CONTROL_ACTIONS,
+    MANUAL_CONTROL_AUTOMATIONS,
+)
 INITIATIVE_ORDER_WIDTH = 200 # Adjusted for potentially wider status text
 INITIATIVE_ORDER_PADDING = 10
 INITIATIVE_ORDER_BG_COLOR = QColor(0, 0, 0, 170) # Same as log for consistency
@@ -317,6 +329,7 @@ class BattleMapWidget(QWidget):
     generatedTokenPlacementCancelled = pyqtSignal()
     initiativeSetupShortcutRequested = pyqtSignal()
     fullManualModeChanged = pyqtSignal(bool)
+    manualControlsChanged = pyqtSignal()
 
     def __init__(
         self,
@@ -369,6 +382,7 @@ class BattleMapWidget(QWidget):
         self._current_round = 1
         self._team_count = 0
         self._full_manual_mode = False
+        self._manual_control_overrides = {control_id: False for control_id in MANUAL_CONTROL_IDS}
         self._needs_initial_fit = False
         self._stage_selector = QComboBox(self)
         self._stage_selector.setToolTip("Current encounter stage")
@@ -824,7 +838,7 @@ class BattleMapWidget(QWidget):
         ignore_token_index: Optional[int] = None,
     ) -> set[tuple[int, int]]:
         cosmetic_anchors: set[tuple[int, int]] = set()
-        if not self._full_manual_mode or not self._map_pixmap or self._map_pixmap.isNull() or self.grid_size_px <= 0:
+        if not self.is_manual_control_enabled(MANUAL_CONTROL_MOVEMENT) or not self._map_pixmap or self._map_pixmap.isNull() or self.grid_size_px <= 0:
             return cosmetic_anchors
 
         width, height = self._normalize_token_footprint(footprint_w, footprint_h)
@@ -1248,7 +1262,7 @@ class BattleMapWidget(QWidget):
         }
 
     def _tick_condition_durations_for_turn_phase(self, token_id: Any, phase: str) -> None:
-        if self._full_manual_mode:
+        if self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS):
             return
         if not isinstance(token_id, str) or not token_id:
             return
@@ -1464,16 +1478,14 @@ class BattleMapWidget(QWidget):
             return False
         if self.is_animating_move or self._is_in_any_selection_mode():
             return False
-        if self._full_manual_mode:
-            return True
         token_data = self.tokens_on_map[token_index]
-        if token_data.get("status", "alive") != "alive":
+        if not self.is_manual_control_enabled(MANUAL_CONTROL_MOVEMENT) and token_data.get("status", "alive") != "alive":
             return False
-        if int(token_data.get("speed", 0) or 0) <= 0:
+        if not self.is_manual_control_enabled(MANUAL_CONTROL_MOVEMENT) and int(token_data.get("speed", 0) or 0) <= 0:
             return False
         if not self._combat_active:
             return True
-        return self._is_tokens_turn(token_index)
+        return self.is_manual_control_enabled(MANUAL_CONTROL_TURNS) or self._is_tokens_turn(token_index)
 
     def _complete_move_selection_to_grid(self, target_grid_pos: Optional[Tuple[int, int]]) -> None:
         token_name = "Token"
@@ -3047,6 +3059,7 @@ class BattleMapWidget(QWidget):
             "grid_offset_y": self.grid_offset_y,
             "team_count": int(max(0, min(8, self._team_count))),
             "full_manual_mode": bool(self._full_manual_mode),
+            "manual_control_overrides": self.get_manual_control_overrides(),
             "combat_active": self._combat_active,
             "current_turn_index": self._current_turn_index,
             "current_round": self._current_round,
@@ -3215,7 +3228,7 @@ class BattleMapWidget(QWidget):
                 and self.move_origin_grid_pos is not None
             ):
                 moving_token = self.tokens_on_map[self.move_origin_token_index]
-                if self._full_manual_mode:
+                if self.is_manual_control_enabled(MANUAL_CONTROL_MOVEMENT):
                     player_movement_squares = self._calculate_all_valid_move_anchors(
                         self.move_origin_token_index,
                         ignore_player_hidden_tokens=True,
@@ -3557,6 +3570,11 @@ class BattleMapWidget(QWidget):
                 self.difficult_terrain_squares = self.normalize_difficult_terrain_squares(raw_runtime_terrain)
             self._terrain_runtime_touched = runtime_terrain_touched
         self._team_count = max(0, min(8, to_int(runtime_state.get("team_count"), 0)))
+        if "manual_control_overrides" in runtime_state:
+            self.set_manual_control_overrides(runtime_state.get("manual_control_overrides"), emit_log=False)
+        elif bool(runtime_state.get("full_manual_mode", False)):
+            # Preserve the all-manual behavior of saves made before individual controls existed.
+            self.set_manual_control_overrides({control_id: True for control_id in MANUAL_CONTROL_IDS}, emit_log=False)
         if "full_manual_mode" in runtime_state:
             self.set_full_manual_mode(bool(runtime_state.get("full_manual_mode", False)), emit_log=False)
 
@@ -3737,7 +3755,7 @@ class BattleMapWidget(QWidget):
 
         if not self.initiative_order:
             self._current_turn_index = -1
-            if not self._full_manual_mode:
+            if not self.is_manual_control_enabled(MANUAL_CONTROL_INITIATIVE):
                 self._combat_active = False
         elif self._current_turn_index < 0 or self._current_turn_index >= len(self.initiative_order):
             self._current_turn_index = 0
@@ -3827,13 +3845,56 @@ class BattleMapWidget(QWidget):
         snapshot["active_token_id"] = active_token_id if isinstance(active_token_id, str) else None
         snapshot["selected_token_id"] = selected_token_id if isinstance(selected_token_id, str) else None
         snapshot["full_manual_mode"] = bool(self._full_manual_mode)
+        snapshot["manual_control_overrides"] = self.get_manual_control_overrides()
         return snapshot
 
     def is_full_manual_mode_enabled(self) -> bool:
         return bool(self._full_manual_mode)
 
+    def get_manual_control_overrides(self) -> dict[str, bool]:
+        return {
+            control_id: bool(self._manual_control_overrides.get(control_id, False))
+            for control_id in MANUAL_CONTROL_IDS
+        }
+
+    def is_manual_control_enabled(self, control_id: str) -> bool:
+        return bool(
+            self._full_manual_mode
+            or self._manual_control_overrides.get(str(control_id), False)
+        )
+
+    def set_manual_control_enabled(self, control_id: str, enabled: bool, emit_log: bool = True) -> bool:
+        control_id = str(control_id)
+        if control_id not in MANUAL_CONTROL_IDS:
+            return False
+        new_value = bool(enabled)
+        if self._manual_control_overrides.get(control_id, False) == new_value:
+            return False
+        self._manual_control_overrides[control_id] = new_value
+        if emit_log:
+            state = "enabled" if new_value else "restored"
+            self.logMessageGenerated.emit(f"MANUAL CONTROL: {control_id.capitalize()} {state}.")
+        self.manualControlsChanged.emit()
+        self.update()
+        return True
+
+    def set_manual_control_overrides(self, controls: Any, emit_log: bool = True) -> bool:
+        raw_controls = controls if isinstance(controls, dict) else {}
+        changed = False
+        for control_id in MANUAL_CONTROL_IDS:
+            new_value = bool(raw_controls.get(control_id, False))
+            if self._manual_control_overrides.get(control_id, False) != new_value:
+                self._manual_control_overrides[control_id] = new_value
+                changed = True
+        if changed:
+            if emit_log:
+                self.logMessageGenerated.emit("MANUAL CONTROLS: Individual overrides updated.")
+            self.manualControlsChanged.emit()
+            self.update()
+        return changed
+
     def _should_auto_end_combat_on_zero_eligible(self) -> bool:
-        return not self._full_manual_mode
+        return not self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS)
 
     def set_full_manual_mode(self, enabled: bool, emit_log: bool = True) -> bool:
         new_value = bool(enabled)
@@ -3842,11 +3903,9 @@ class BattleMapWidget(QWidget):
         self._full_manual_mode = new_value
         if emit_log:
             if new_value:
-                self.logMessageGenerated.emit(
-                    "FULL MANUAL: Rule enforcement is disabled (initiative/turn/move/action locks and combat automations)."
-                )
+                self.logMessageGenerated.emit("FULL MANUAL: All manual controls are active.")
             else:
-                self.logMessageGenerated.emit("FULL MANUAL: Rule enforcement restored.")
+                self.logMessageGenerated.emit("FULL MANUAL: Master override off; individual manual controls remain active.")
         self.fullManualModeChanged.emit(new_value)
         self.update()
         return True
@@ -4181,6 +4240,10 @@ class BattleMapWidget(QWidget):
                 self.logMessageGenerated.emit("No active tokens left in combat. Ending combat.")
                 self._request_end_combat()
                 ended_combat = True
+        elif start_if_ready and self.is_manual_control_enabled(MANUAL_CONTROL_INITIATIVE):
+            self._start_combat_full_manual()
+            started_combat = bool(self._combat_active)
+            changed = changed or started_combat
         elif start_if_ready and not missing_alive_tokens:
             ready_tokens = [
                 token
@@ -4192,7 +4255,8 @@ class BattleMapWidget(QWidget):
             if ready_tokens:
                 self._combat_active = True
                 self._current_round = 1
-                self._reset_opportunity_attack_reactions()
+                if not self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS):
+                    self._reset_opportunity_attack_reactions()
                 self.rebuild_initiative_order(preserve_active_token=False)
                 self.logMessageGenerated.emit("⚔️ COMBAT BEGINS! ⚔️")
                 log_lines = ["Initiative Order:"]
@@ -5381,17 +5445,22 @@ class BattleMapWidget(QWidget):
             name = self._clean_token_name(token_data.get('name', 'N/A'))
             current_status = token_data.get('status', 'alive')
             active_conditions_on_token = token_data.get('active_conditions', set()) # For Manage Conditions
-            full_manual = self._full_manual_mode
+            manual_actions = self.is_manual_control_enabled(MANUAL_CONTROL_ACTIONS)
+            manual_turns = self.is_manual_control_enabled(MANUAL_CONTROL_TURNS)
+            manual_movement = self.is_manual_control_enabled(MANUAL_CONTROL_MOVEMENT)
+            manual_automations = self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS)
 
             is_this_tokens_turn = self._is_tokens_turn(clicked_token_index)
-            if full_manual:
-                can_perform_combat_actions = True
-                can_perform_movement = True
-            else:
-                can_perform_combat_actions = self._token_can_take_actions(token_data) and (not self._combat_active or is_this_tokens_turn)
-                can_perform_movement = (current_status == 'alive') and (not self._combat_active or is_this_tokens_turn)
+            can_perform_combat_actions = (
+                (manual_actions or self._token_can_take_actions(token_data))
+                and (manual_turns or not self._combat_active or is_this_tokens_turn)
+            )
+            can_perform_movement = (
+                (manual_movement or current_status == 'alive')
+                and (manual_turns or not self._combat_active or is_this_tokens_turn)
+            )
             token_can_use_off_turn_reaction_attack = False
-            if (not full_manual) and self._combat_active and not is_this_tokens_turn:
+            if (not manual_turns) and self._combat_active and not is_this_tokens_turn:
                 token_can_use_off_turn_reaction_attack = (
                     self._token_can_take_reactions(token_data)
                     and self._has_oa_reaction_available(token_data)
@@ -5415,7 +5484,7 @@ class BattleMapWidget(QWidget):
             info_action.setEnabled(False)
             menu.addAction(info_action)
 
-            if (not full_manual) and self._combat_active and not is_this_tokens_turn and self._token_can_take_actions(token_data):
+            if (not manual_turns) and self._combat_active and not is_this_tokens_turn and (manual_actions or self._token_can_take_actions(token_data)):
                 not_turn_action = QAction("(Not this token's turn for standard actions)", self)
                 not_turn_action.setEnabled(False)
                 menu.addAction(not_turn_action)
@@ -5440,11 +5509,9 @@ class BattleMapWidget(QWidget):
             ready_reaction_act.setCheckable(True)
             ready_reaction_act.setChecked(bool(token_data.get("readied_reaction_armed", False)))
             ready_reaction_act.setEnabled(
-                True if full_manual else (
-                    self._token_can_take_actions(token_data)
-                    and self._combat_active
-                    and is_this_tokens_turn
-                )
+                (manual_actions or self._token_can_take_actions(token_data))
+                and (manual_turns or (self._combat_active and is_this_tokens_turn))
+                and (manual_actions or manual_automations or self._has_oa_reaction_available(token_data))
             )
             ready_reaction_act.triggered.connect(
                 partial(self._handle_initiate_generic_action, clicked_token_index, "Ready Action/Reaction")
@@ -5507,11 +5574,11 @@ class BattleMapWidget(QWidget):
             else:
                 concentration_act = QAction("Concentration...", self)
                 concentration_act.setEnabled(
-                    True if full_manual else (
+                    (manual_actions or (
                         self._combat_active
                         and current_status == "alive"
                         and not self._token_is_incapacitated_condition(token_data)
-                    )
+                    ))
                 )
                 concentration_act.triggered.connect(partial(self._prompt_start_concentration, clicked_token_index))
                 status_menu.addAction(concentration_act)
@@ -5767,7 +5834,7 @@ class BattleMapWidget(QWidget):
         if not self.tokens_on_map:
             self.logMessageGenerated.emit("Cannot begin combat—no tokens present.")
             return
-        if self._full_manual_mode:
+        if self.is_manual_control_enabled(MANUAL_CONTROL_INITIATIVE):
             self._start_combat_full_manual()
             return
         missing_initiative_tokens = self._get_alive_tokens_missing_initiative()
@@ -5807,14 +5874,15 @@ class BattleMapWidget(QWidget):
 
         self._combat_active = True
         self._current_round = 1
-        self._reset_opportunity_attack_reactions()
+        if not self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS):
+            self._reset_opportunity_attack_reactions()
         rebuild_result = self.rebuild_initiative_order(preserve_active_token=False)
         if rebuild_result.get("eligible_count", 0) <= 0:
             self._current_turn_index = -1
             self._selected_token_index = None
             self._stop_active_turn_indicator()
 
-        self.logMessageGenerated.emit("⚔️ COMBAT BEGINS! (FULL MANUAL) ⚔️")
+        self.logMessageGenerated.emit("⚔️ COMBAT BEGINS! (MANUAL INITIATIVE) ⚔️")
         if self.initiative_order:
             log_lines = ["Initiative Order:"]
             for i, token_data in enumerate(self.initiative_order):
@@ -5828,7 +5896,7 @@ class BattleMapWidget(QWidget):
                 current_token_name = self._clean_token_name(self.initiative_order[self._current_turn_index].get("name", "?"))
                 self.logMessageGenerated.emit(f"ROUND 1 BEGINS! TURN: {current_token_name}.")
         else:
-            self.logMessageGenerated.emit("FULL MANUAL: Combat started without an initiative order (all initiatives optional).")
+            self.logMessageGenerated.emit("MANUAL INITIATIVE: Combat started without an initiative order.")
 
         self.tokenDataModified.emit()
         self.update()
@@ -5868,7 +5936,7 @@ class BattleMapWidget(QWidget):
             return
         if 0 <= self._current_turn_index < len(self.initiative_order):
             previous_token_id = self.initiative_order[self._current_turn_index].get("id")
-            if not self._full_manual_mode:
+            if not self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS):
                 self._tick_condition_durations_for_turn_phase(previous_token_id, "end")
         num_tokens_in_order = len(self.initiative_order)
         for i in range(num_tokens_in_order): 
@@ -5884,7 +5952,7 @@ class BattleMapWidget(QWidget):
                 self._current_turn_index = next_potential_initiative_index
                 if is_new_round:
                     self._current_round += 1
-                    if not self._full_manual_mode:
+                    if not self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS):
                         self._reset_opportunity_attack_reactions()
                     self.logMessageGenerated.emit(f"⏳ ROUND {self._current_round} BEGINS! ⏳")
                 self._selected_token_index = self._get_map_index_for_token_id(current_token_in_order.get('id'))
@@ -5902,10 +5970,10 @@ class BattleMapWidget(QWidget):
                 active_token_id = current_token_in_order.get("id")
                 if isinstance(active_token_id, str):
                     self._start_active_turn_indicator(active_token_id)
-                    if not self._full_manual_mode:
+                    if not self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS):
                         self._tick_condition_durations_for_turn_phase(active_token_id, "start")
                         self._tick_concentration_for_token_turn_start(active_token_id)
-                if not self._full_manual_mode:
+                if not self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS):
                     self._expire_readied_reaction_for_token_id(active_token_id, emit_log=True)
                 current_token_name = self._clean_token_name(current_token_in_order.get('name', '?'))
                 log_msg = f"TURN: {current_token_name}."
@@ -6062,15 +6130,15 @@ class BattleMapWidget(QWidget):
         if rounds_int < 1:
             self.logMessageGenerated.emit(f"CONCENTRATION: Invalid duration for {token_name}.")
             return False
-        if not self._full_manual_mode and not self._combat_active:
+        if not self.is_manual_control_enabled(MANUAL_CONTROL_ACTIONS) and not self._combat_active:
             self.logMessageGenerated.emit(f"CONCENTRATION: {token_name} can only concentrate during combat.")
             return False
-        if not self._full_manual_mode and token_data.get("status", "alive") != "alive":
+        if not self.is_manual_control_enabled(MANUAL_CONTROL_ACTIONS) and token_data.get("status", "alive") != "alive":
             self.logMessageGenerated.emit(
                 f"CONCENTRATION: {token_name} cannot concentrate (Status: {token_data.get('status', 'N/A').capitalize()})."
             )
             return False
-        if not self._full_manual_mode and self._token_is_incapacitated_condition(token_data):
+        if not self.is_manual_control_enabled(MANUAL_CONTROL_ACTIONS) and self._token_is_incapacitated_condition(token_data):
             blocking_condition = self._token_action_blocking_condition_name(token_data) or "incapacitates"
             self.logMessageGenerated.emit(
                 f"CONCENTRATION: {token_name} cannot concentrate while affected by {blocking_condition}."
@@ -6101,7 +6169,7 @@ class BattleMapWidget(QWidget):
         return True
 
     def _tick_concentration_for_token_turn_start(self, token_id: str) -> None:
-        if self._full_manual_mode:
+        if self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS):
             return
         if not isinstance(token_id, str) or not token_id:
             return
@@ -6189,7 +6257,7 @@ class BattleMapWidget(QWidget):
         return True
 
     def _expire_readied_reaction_for_token_id(self, token_id: Any, emit_log: bool = True) -> bool:
-        if self._full_manual_mode:
+        if self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS):
             return False
         if not isinstance(token_id, str) or not token_id:
             return False
@@ -6248,7 +6316,7 @@ class BattleMapWidget(QWidget):
         from_grid: tuple[int, int],
         to_grid: tuple[int, int],
     ) -> list[int]:
-        if self._full_manual_mode or not self._combat_active:
+        if self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS) or not self._combat_active:
             return []
         if not (0 <= mover_index < len(self.tokens_on_map)):
             return []
@@ -6287,7 +6355,7 @@ class BattleMapWidget(QWidget):
         return sorted(attacker_indices, key=sort_key)
 
     def _process_opportunity_attacks_for_step(self, mover_index: int, attacker_indices: list[int]) -> dict[str, Any]:
-        if self._full_manual_mode:
+        if self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS):
             return {"continue_movement": True, "mover_invalid": False}
         if not (0 <= mover_index < len(self.tokens_on_map)):
             return {"continue_movement": False, "mover_invalid": True}
@@ -6374,34 +6442,36 @@ class BattleMapWidget(QWidget):
             return
         actor_data = self.tokens_on_map[actor_index]
         actor_name = self._clean_token_name(actor_data.get('name', 'Token'))
-        full_manual = self._full_manual_mode
-        if not full_manual and actor_data.get('status') != 'alive':
+        manual_actions = self.is_manual_control_enabled(MANUAL_CONTROL_ACTIONS)
+        manual_turns = self.is_manual_control_enabled(MANUAL_CONTROL_TURNS)
+        manual_automations = self.is_manual_control_enabled(MANUAL_CONTROL_AUTOMATIONS)
+        if not manual_actions and actor_data.get('status') != 'alive':
             self.logMessageGenerated.emit(f"{actor_name} cannot perform '{action_category}' (Status: {actor_data.get('status', 'N/A').capitalize()}).")
             return
-        if not full_manual and self._token_is_incapacitated_condition(actor_data):
+        if not manual_actions and self._token_is_incapacitated_condition(actor_data):
             blocking_condition = self._token_action_blocking_condition_name(actor_data) or "Incapacitated"
             self.logMessageGenerated.emit(f"{actor_name} cannot perform '{action_category}' ({blocking_condition}).")
             return
         is_this_tokens_turn = self._is_tokens_turn(actor_index)
         can_use_off_turn_reaction_attack = (
-            (not full_manual)
+            (not manual_turns)
             and self._combat_active
             and not is_this_tokens_turn
             and action_category in {"Single Target Attack"}
             and self._token_can_take_reactions(actor_data)
             and self._has_oa_reaction_available(actor_data)
         )
-        if (not full_manual) and self._combat_active and not is_this_tokens_turn and not can_use_off_turn_reaction_attack:
+        if (not manual_turns) and self._combat_active and not is_this_tokens_turn and not can_use_off_turn_reaction_attack:
             self.logMessageGenerated.emit(f"It is not {actor_name}'s turn to perform '{action_category}'.")
             return
         if action_category == "Ready Action/Reaction":
-            if (not full_manual) and not self._combat_active:
+            if (not manual_turns) and not self._combat_active:
                 self.logMessageGenerated.emit("Ready Action/Reaction is available only during combat.")
                 return
-            if (not full_manual) and not is_this_tokens_turn:
+            if (not manual_turns) and not is_this_tokens_turn:
                 self.logMessageGenerated.emit(f"It is not {actor_name}'s turn to ready a reaction.")
                 return
-            if (not full_manual) and not self._has_oa_reaction_available(actor_data):
+            if (not (manual_actions or manual_automations)) and not self._has_oa_reaction_available(actor_data):
                 self.logMessageGenerated.emit(f"{actor_name} cannot ready a reaction because their reaction is already spent this round.")
                 return
             new_armed = not bool(actor_data.get("readied_reaction_armed", False))
@@ -6626,7 +6696,7 @@ class BattleMapWidget(QWidget):
             return {"status": "error", "reason": "invalid_actor"}
         actor_data = self.tokens_on_map[actor_index]
         actor_name = self._clean_token_name(actor_data.get('name', 'Unknown Actor'))
-        if (not self._full_manual_mode) and self._combat_active and not self._is_tokens_turn(actor_index) and not allow_off_turn:
+        if (not self.is_manual_control_enabled(MANUAL_CONTROL_TURNS)) and self._combat_active and not self._is_tokens_turn(actor_index) and not allow_off_turn:
             self.logMessageGenerated.emit(f"It is not {actor_name}'s turn to perform '{action_category}'.")
             self._cancel_action_selection(triggered_by_user_cancel=False)
             return {"status": "error", "reason": "not_turn"}
@@ -7256,17 +7326,17 @@ class BattleMapWidget(QWidget):
         if not (0 <= token_index < len(self.tokens_on_map)): return
         token_data = self.tokens_on_map[token_index]
         name = token_data.get('name', 'Token')
-        if (not self._full_manual_mode) and token_data.get('status', 'alive') != 'alive': self.logMessageGenerated.emit(f"'{name}' cannot move (Status: {token_data.get('status', 'N/A').capitalize()})."); return
-        if (not self._full_manual_mode) and self._combat_active and not self._is_tokens_turn(token_index):
+        if (not self.is_manual_control_enabled(MANUAL_CONTROL_MOVEMENT)) and token_data.get('status', 'alive') != 'alive': self.logMessageGenerated.emit(f"'{name}' cannot move (Status: {token_data.get('status', 'N/A').capitalize()})."); return
+        if (not self.is_manual_control_enabled(MANUAL_CONTROL_TURNS)) and self._combat_active and not self._is_tokens_turn(token_index):
             self.logMessageGenerated.emit(f"It is not {name}'s turn to move.")
             return
         speed = token_data.get('speed', 0)
-        if (not self._full_manual_mode) and speed <= 0: self.logMessageGenerated.emit(f"'{name}' cannot move (Speed: 0)."); return
+        if (not self.is_manual_control_enabled(MANUAL_CONTROL_MOVEMENT)) and speed <= 0: self.logMessageGenerated.emit(f"'{name}' cannot move (Speed: 0)."); return
         if self._selected_token_index != token_index: self._selected_token_index = token_index
         self.is_selecting_move_target = True
         self.move_origin_token_index = token_index
         self.move_origin_grid_pos = (token_data['grid_x'], token_data['grid_y'])
-        if self._full_manual_mode:
+        if self.is_manual_control_enabled(MANUAL_CONTROL_MOVEMENT):
             self.highlighted_movement_squares = self._calculate_all_valid_move_anchors(token_index)
         else:
             self.highlighted_movement_squares = self._calculate_reachable_squares(self.move_origin_grid_pos, speed, moving_token_index=token_index)

@@ -80,6 +80,7 @@ class MainWindow(QMainWindow):
         self.toggle_presentation_action: Union[QAction, None] = None
         self.open_dm_panel_action: Union[QAction, None] = None
         self.manage_initiative_action: Union[QAction, None] = None
+        self.full_manual_action: Union[QAction, None] = None
         self.player_battle_follow_dm_stage_action: Union[QAction, None] = None
         self.player_battle_follow_dm_camera_action: Union[QAction, None] = None
         self.player_battle_follow_dm_zoom_action: Union[QAction, None] = None
@@ -496,6 +497,18 @@ class MainWindow(QMainWindow):
         )
         view_menu.addAction(self.manage_initiative_action)
         self._register_hotkey_action("view.manage_initiative", "View", self.manage_initiative_action)
+        self.full_manual_action = QAction("Full Manual", self)
+        self.full_manual_action.setCheckable(True)
+        self.full_manual_action.setToolTip(
+            "Enable every manual combat control for the active encounter. Configure a hotkey in Edit → Hotkey Settings."
+        )
+        self._connect_safe(
+            self.full_manual_action.toggled,
+            self._handle_full_manual_action_toggled,
+            "_handle_full_manual_action_toggled",
+        )
+        view_menu.addAction(self.full_manual_action)
+        self._register_hotkey_action("view.full_manual", "View", self.full_manual_action)
         view_menu.addSeparator()
         self.player_battle_follow_dm_stage_action = QAction("Player Battle: Follow DM Stage", self)
         self.player_battle_follow_dm_stage_action.setCheckable(True)
@@ -733,6 +746,56 @@ class MainWindow(QMainWindow):
         else:
             self._enter_presentation_session()
 
+    @pyqtSlot(bool)
+    def _handle_full_manual_action_toggled(self, enabled: bool) -> None:
+        if not self.battle_map_widget or not self.stacked_widget or self.stacked_widget.currentIndex() != BATTLE_MAP_VIEW_INDEX:
+            self._sync_full_manual_action(False)
+            if self._status_bar:
+                self._status_bar.showMessage("Full Manual is available while an encounter is open.", 4000)
+            return
+        self.battle_map_widget.set_full_manual_mode(bool(enabled))
+
+    @pyqtSlot(bool)
+    def _handle_full_manual_mode_changed(self, enabled: bool) -> None:
+        self._sync_full_manual_action(bool(enabled))
+        self.mark_project_as_modified(True)
+        self._sync_dm_panel_from_timeline()
+        self._request_player_battle_snapshot_refresh()
+        if self._status_bar:
+            self._status_bar.showMessage(
+                "Full Manual enabled." if enabled else "Full Manual disabled; individual controls remain in effect.",
+                3500,
+            )
+
+    @pyqtSlot()
+    def _handle_manual_controls_changed(self) -> None:
+        self.mark_project_as_modified(True)
+        self._sync_dm_panel_from_timeline()
+        self._request_player_battle_snapshot_refresh()
+
+    @pyqtSlot(bool)
+    def _handle_dm_full_manual_mode_toggled(self, enabled: bool) -> None:
+        if not self.battle_map_widget or not self.stacked_widget:
+            return
+        if self.stacked_widget.currentIndex() != BATTLE_MAP_VIEW_INDEX:
+            return
+        self.battle_map_widget.set_full_manual_mode(bool(enabled))
+
+    @pyqtSlot(str, bool)
+    def _handle_dm_manual_control_toggled(self, control_id: str, enabled: bool) -> None:
+        if not self.battle_map_widget or not self.stacked_widget:
+            return
+        if self.stacked_widget.currentIndex() != BATTLE_MAP_VIEW_INDEX:
+            return
+        self.battle_map_widget.set_manual_control_enabled(control_id, bool(enabled))
+
+    def _sync_full_manual_action(self, enabled: bool) -> None:
+        if self.full_manual_action is None:
+            return
+        self.full_manual_action.blockSignals(True)
+        self.full_manual_action.setChecked(bool(enabled))
+        self.full_manual_action.blockSignals(False)
+
     def _enter_presentation_session(self):
         if self.player_view_window is None:
             self.player_view_window = PlayerViewWindow()
@@ -841,6 +904,16 @@ class MainWindow(QMainWindow):
                 self._handle_dm_difficult_terrain_tool_toggled,
                 "_handle_dm_difficult_terrain_tool_toggled",
             )
+            self._connect_safe(
+                self.dm_control_panel.fullManualModeToggled,
+                self._handle_dm_full_manual_mode_toggled,
+                "_handle_dm_full_manual_mode_toggled",
+            )
+            self._connect_safe(
+                self.dm_control_panel.manualControlToggled,
+                self._handle_dm_manual_control_toggled,
+                "_handle_dm_manual_control_toggled",
+            )
             self.dm_control_panel.set_movement_count_mode(self._movement_count_mode)
         return self.dm_control_panel
 
@@ -895,6 +968,11 @@ class MainWindow(QMainWindow):
                 if isinstance(raw_selected_token_id, str) and raw_selected_token_id:
                     selected_battle_token_id = raw_selected_token_id
         self.dm_control_panel.set_battle_token_state(battle_tokens, selected_battle_token_id)
+        if self.battle_map_widget:
+            self.dm_control_panel.set_manual_controls_state(
+                self.battle_map_widget.is_full_manual_mode_enabled(),
+                self.battle_map_widget.get_manual_control_overrides(),
+            )
         self.dm_control_panel.set_movement_count_mode(self._movement_count_mode)
         if self.initiative_manager_dialog and self.initiative_manager_dialog.isVisible() and self.battle_map_widget:
             if not self.initiative_manager_dialog.has_pending_changes():
@@ -2001,6 +2079,16 @@ class MainWindow(QMainWindow):
                 self._handle_battle_initiative_setup_shortcut_requested,
                 "_handle_battle_initiative_setup_shortcut_requested",
             )
+            self._connect_safe(
+                self.battle_map_widget.fullManualModeChanged,
+                self._handle_full_manual_mode_changed,
+                "_handle_full_manual_mode_changed",
+            )
+            self._connect_safe(
+                self.battle_map_widget.manualControlsChanged,
+                self._handle_manual_controls_changed,
+                "_handle_manual_controls_changed",
+            )
 
     @pyqtSlot(str)
     def _update_hover_time(self, time_str: str):
@@ -2781,6 +2869,7 @@ class MainWindow(QMainWindow):
                     print(f"Warning: Failed to restore runtime state for clip '{self.active_encounter_clip_id}': {e}")
                     traceback.print_exc()
         self.stacked_widget.setCurrentIndex(BATTLE_MAP_VIEW_INDEX)
+        self._sync_full_manual_action(self.battle_map_widget.is_full_manual_mode_enabled())
         QTimer.singleShot(0, self.battle_map_widget.fit_view_to_map)
         QTimer.singleShot(60, self.battle_map_widget.fit_view_to_map)
         self.battle_map_widget.setFocus()
@@ -2858,6 +2947,7 @@ class MainWindow(QMainWindow):
         print("MainWindow.end_encounter: Ending Encounter...")
         if self.initiative_manager_dialog and self.initiative_manager_dialog.isVisible():
             self.initiative_manager_dialog.close()
+        self._sync_full_manual_action(False)
         runtime_state_changed = self._snapshot_active_encounter_runtime()
         if runtime_state_changed:
             self.mark_project_as_modified(True)

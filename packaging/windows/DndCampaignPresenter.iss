@@ -2,7 +2,7 @@
 #define MyAppExeName "DND Campaign Presenter.exe"
 
 #ifndef AppVersion
-  #define AppVersion "1.2.3"
+  #define AppVersion "1.2.4"
 #endif
 
 #ifndef BuildRoot

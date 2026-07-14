@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .timeline_editor import TimelineEditorWidget
+from .manual_controls_dialog import MANUAL_CONTROL_FEATURES
 from .window_geometry import restore_window_geometry, save_window_geometry
 
 
@@ -386,6 +387,8 @@ class DMControlPanelDialog(QDialog):
     battleTokenParticipationChanged = pyqtSignal(list, str)
     battleTokenVisibilityChanged = pyqtSignal(list, str)
     battleTokenMoveStageRequested = pyqtSignal(list)
+    fullManualModeToggled = pyqtSignal(bool)
+    manualControlToggled = pyqtSignal(str, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -409,6 +412,9 @@ class DMControlPanelDialog(QDialog):
         self._is_refreshing_movement_mode_ui = False
         self._fog_color = DEFAULT_FOG_COLOR
         self._updating_grid_tool_ui = False
+        self._is_refreshing_manual_controls_ui = False
+        self._full_manual_enabled = False
+        self._manual_control_states: dict[str, bool] = {}
 
         main_layout = QVBoxLayout(self)
 
@@ -585,6 +591,26 @@ class DMControlPanelDialog(QDialog):
         session_layout.addWidget(grid_settings_group)
         controls_layout.addWidget(session_group)
 
+        self.manual_controls_group = QGroupBox("Manual Controls")
+        manual_controls_layout = QVBoxLayout(self.manual_controls_group)
+        self.full_manual_checkbox = QCheckBox("Full Manual")
+        self.full_manual_checkbox.setToolTip("Handle every listed combat rule manually for this encounter.")
+        manual_controls_layout.addWidget(self.full_manual_checkbox)
+        self.manual_controls_status_label = QLabel()
+        self.manual_controls_status_label.setWordWrap(True)
+        self.manual_controls_status_label.setStyleSheet("color: #d7dde7;")
+        manual_controls_layout.addWidget(self.manual_controls_status_label)
+        self._manual_control_checkboxes: dict[str, QCheckBox] = {}
+        for control_id, label, description in MANUAL_CONTROL_FEATURES:
+            checkbox = QCheckBox(label)
+            checkbox.setToolTip(description)
+            checkbox.toggled.connect(
+                lambda enabled, feature_id=control_id: self._handle_manual_control_toggled(feature_id, enabled)
+            )
+            manual_controls_layout.addWidget(checkbox)
+            self._manual_control_checkboxes[control_id] = checkbox
+        controls_layout.addWidget(self.manual_controls_group)
+
         token_group = QGroupBox("Encounter Token Controls")
         token_layout = QVBoxLayout(token_group)
         self.battle_token_list = BattleTokenListWidget()
@@ -656,6 +682,7 @@ class DMControlPanelDialog(QDialog):
         self.add_difficult_terrain_checkbox.stateChanged.connect(self._handle_difficult_terrain_tool_changed)
         self.fog_mode_combo.currentIndexChanged.connect(self._handle_fog_tool_settings_changed)
         self.fog_color_button.clicked.connect(self._choose_fog_color)
+        self.full_manual_checkbox.toggled.connect(self._handle_full_manual_toggled)
         self.battle_token_list.tokenSelectionCommitted.connect(self._handle_battle_token_selection_committed)
         self.movement_count_mode_combo.currentIndexChanged.connect(self._handle_movement_count_mode_changed)
         self.manage_initiative_button.clicked.connect(self.initiativeManagerRequested.emit)
@@ -666,6 +693,7 @@ class DMControlPanelDialog(QDialog):
         self.set_session_controls_state(False, False)
         self._refresh_fog_color_button()
         self._refresh_battle_token_controls()
+        self._refresh_manual_controls()
         self._set_mini_timeline_mode("move_clips")
         self._apply_readable_dark_theme()
 
@@ -857,6 +885,64 @@ class DMControlPanelDialog(QDialog):
         if not self._in_battle_mode and self.add_difficult_terrain_checkbox.isChecked():
             self.add_difficult_terrain_checkbox.setChecked(False)
         self._refresh_battle_token_controls()
+        self._refresh_manual_controls()
+
+    def set_manual_controls_state(
+        self,
+        full_manual_enabled: bool,
+        feature_states: dict[str, bool],
+    ) -> None:
+        self._full_manual_enabled = bool(full_manual_enabled)
+        self._manual_control_states = {
+            feature_id: bool(feature_states.get(feature_id, False))
+            for feature_id, _, _ in MANUAL_CONTROL_FEATURES
+        }
+        self._refresh_manual_controls()
+
+    def _refresh_manual_controls(self) -> None:
+        if not hasattr(self, "full_manual_checkbox"):
+            return
+        self._is_refreshing_manual_controls_ui = True
+        try:
+            self.full_manual_checkbox.blockSignals(True)
+            self.full_manual_checkbox.setChecked(self._full_manual_enabled)
+            self.full_manual_checkbox.blockSignals(False)
+            self.full_manual_checkbox.setEnabled(self._in_battle_mode)
+            for feature_id, checkbox in self._manual_control_checkboxes.items():
+                checkbox.blockSignals(True)
+                checkbox.setChecked(bool(self._manual_control_states.get(feature_id, False)))
+                checkbox.blockSignals(False)
+                checkbox.setEnabled(self._in_battle_mode and not self._full_manual_enabled)
+        finally:
+            self._is_refreshing_manual_controls_ui = False
+
+        if not self._in_battle_mode:
+            self.manual_controls_status_label.setText("Open an encounter to change manual controls.")
+        elif self._full_manual_enabled:
+            self.manual_controls_status_label.setText(
+                "Full Manual is on. Turn it off to choose individual rule groups."
+            )
+        else:
+            enabled_count = sum(1 for enabled in self._manual_control_states.values() if enabled)
+            self.manual_controls_status_label.setText(
+                "All combat rules are automatic."
+                if not enabled_count
+                else f"{enabled_count} manual rule group(s) active."
+            )
+
+    def _handle_full_manual_toggled(self, enabled: bool) -> None:
+        if self._is_refreshing_manual_controls_ui or not self._in_battle_mode:
+            return
+        self._full_manual_enabled = bool(enabled)
+        self._refresh_manual_controls()
+        self.fullManualModeToggled.emit(bool(enabled))
+
+    def _handle_manual_control_toggled(self, feature_id: str, enabled: bool) -> None:
+        if self._is_refreshing_manual_controls_ui or not self._in_battle_mode:
+            return
+        self._manual_control_states[feature_id] = bool(enabled)
+        self._refresh_manual_controls()
+        self.manualControlToggled.emit(feature_id, bool(enabled))
 
     def set_battle_token_state(
         self,

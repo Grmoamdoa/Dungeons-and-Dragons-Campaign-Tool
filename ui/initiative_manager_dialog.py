@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 
 from .dialog_theme import apply_readable_dialog_theme
 from .window_geometry import restore_window_geometry, save_window_geometry
+from .manual_controls_dialog import ManualControlsDialog
 
 
 TEAM_PALETTE = [
@@ -98,6 +99,7 @@ class InitiativeManagerDialog(QDialog):
         self._team_participation_buttons: dict[int, QPushButton] = {}
         self._team_bucket_order: list[int] = []
         self._team_token_meta_by_id: dict[str, dict[str, Any]] = {}
+        self._manual_controls_dialog: Optional[ManualControlsDialog] = None
 
         self.setWindowTitle("Initiative Manager")
         self.setModal(False)
@@ -170,8 +172,10 @@ class InitiativeManagerDialog(QDialog):
         self._full_manual_button = QPushButton("Full Manual")
         self._full_manual_button.setCheckable(True)
         self._full_manual_button.setToolTip(
-            "Disable initiative/turn/movement/action combat rule enforcement and automations until toggled off."
+            "Enable every manual rule control at once. Use Manual Controls to choose individual overrides."
         )
+        self._manual_controls_button = QPushButton("Manual Controls...")
+        self._manual_controls_button.setToolTip("Choose which combat rules to handle manually during this encounter.")
         self._apply_button = QPushButton("Apply")
         self._refresh_button = QPushButton("Refresh")
         self._generate_button = QPushButton("Generate New Token...")
@@ -181,6 +185,7 @@ class InitiativeManagerDialog(QDialog):
         button_row.addWidget(self._generate_button)
         button_row.addWidget(self._set_teams_button)
         button_row.addWidget(self._full_manual_button)
+        button_row.addWidget(self._manual_controls_button)
         button_row.addStretch(1)
         button_row.addWidget(self._refresh_button)
         button_row.addWidget(self._apply_button)
@@ -198,7 +203,12 @@ class InitiativeManagerDialog(QDialog):
         self._generate_button.clicked.connect(self._request_generate_token)
         self._set_teams_button.clicked.connect(self._prompt_set_teams)
         self._full_manual_button.toggled.connect(self._handle_full_manual_toggled)
+        self._manual_controls_button.clicked.connect(self._show_manual_controls)
         self._close_button.clicked.connect(self.close)
+        if hasattr(self._battle_map_widget, "fullManualModeChanged"):
+            self._battle_map_widget.fullManualModeChanged.connect(self._handle_full_manual_mode_changed)
+        if hasattr(self._battle_map_widget, "manualControlsChanged"):
+            self._battle_map_widget.manualControlsChanged.connect(self._sync_manual_controls_dialog)
 
         self.refresh_from_source()
 
@@ -320,7 +330,7 @@ class InitiativeManagerDialog(QDialog):
                 "QPushButton { background-color: #f59e0b; color: #111827; font-weight: 700; }"
             )
             self._focus_hint.setText(
-                "Full Manual is ON. Initiative values are optional and combat rule locks are disabled."
+                "Full Manual is ON. Every manual rule control is active until you turn it off."
             )
         else:
             self._full_manual_button.setText("Full Manual")
@@ -331,6 +341,37 @@ class InitiativeManagerDialog(QDialog):
         if hasattr(self._battle_map_widget, "set_full_manual_mode"):
             self._battle_map_widget.set_full_manual_mode(bool(checked))
         self._sync_full_manual_button_state(bool(checked))
+
+    def _handle_full_manual_mode_changed(self, enabled: bool) -> None:
+        self._sync_full_manual_button_state(bool(enabled))
+        self._sync_manual_controls_dialog()
+
+    def _show_manual_controls(self) -> None:
+        if not hasattr(self._battle_map_widget, "get_manual_control_overrides"):
+            return
+        if self._manual_controls_dialog is None:
+            self._manual_controls_dialog = ManualControlsDialog(
+                self._battle_map_widget.get_manual_control_overrides(),
+                bool(self._battle_map_widget.is_full_manual_mode_enabled()),
+                self._handle_manual_control_toggled,
+                self,
+            )
+        self._sync_manual_controls_dialog()
+        self._manual_controls_dialog.show()
+        self._manual_controls_dialog.raise_()
+        self._manual_controls_dialog.activateWindow()
+
+    def _handle_manual_control_toggled(self, control_id: str, enabled: bool) -> None:
+        if hasattr(self._battle_map_widget, "set_manual_control_enabled"):
+            self._battle_map_widget.set_manual_control_enabled(control_id, enabled)
+
+    def _sync_manual_controls_dialog(self) -> None:
+        if self._manual_controls_dialog is None or not hasattr(self._battle_map_widget, "get_manual_control_overrides"):
+            return
+        self._manual_controls_dialog.set_controls_state(
+            self._battle_map_widget.get_manual_control_overrides(),
+            bool(self._battle_map_widget.is_full_manual_mode_enabled()),
+        )
 
     def _prompt_set_teams(self) -> None:
         default_value = self._team_count if self._team_count > 0 else 2
@@ -670,14 +711,14 @@ class InitiativeManagerDialog(QDialog):
             return False
 
         result = self._battle_map_widget.apply_initiative_values(values_by_token_id, start_if_ready=True)
-        full_manual_enabled = False
-        if hasattr(self._battle_map_widget, "is_full_manual_mode_enabled"):
+        manual_initiative_enabled = False
+        if hasattr(self._battle_map_widget, "is_manual_control_enabled"):
             try:
-                full_manual_enabled = bool(self._battle_map_widget.is_full_manual_mode_enabled())
+                manual_initiative_enabled = bool(self._battle_map_widget.is_manual_control_enabled("initiative"))
             except Exception:
-                full_manual_enabled = False
+                manual_initiative_enabled = False
         missing_alive = result.get("missing_alive_tokens", []) if isinstance(result, dict) else []
-        if (not full_manual_enabled) and isinstance(missing_alive, list) and missing_alive:
+        if (not manual_initiative_enabled) and isinstance(missing_alive, list) and missing_alive:
             missing_lines = "\n- ".join(str(name) for name in missing_alive)
             QMessageBox.warning(
                 self,
