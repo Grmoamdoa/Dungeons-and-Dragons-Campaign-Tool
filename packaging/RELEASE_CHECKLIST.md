@@ -57,10 +57,10 @@ Record the SHA256 values in the release notes.
   - SHA256 checksums
 - Download each artifact from GitHub once and confirm the uploaded files match local checksums.
 
-## 1.2.3 Release Status
+## 1.2.4 Release Status
 
-- Done: source tree prepared for the `1.2.3` release.
+- Done: source tree prepared for the `1.2.4` release.
 - Done: repository ignores local build output, virtual environments, macOS metadata, and local `.dcp` campaign saves.
 - Done: public-facing source files and release docs were scrubbed of personal names and machine-specific paths.
-- Next: build the macOS and Windows installer artifacts with version `1.2.3`.
-- Next: smoke test both installers, generate SHA256 checksums, and attach them to a GitHub Release tagged `v1.2.3`.
+- Next: build the macOS and Windows installer artifacts with version `1.2.4`.
+- Next: smoke test both installers, generate SHA256 checksums, and attach them to a GitHub Release tagged `v1.2.4`.

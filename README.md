@@ -18,8 +18,8 @@ Current MVP status:
 Packaged installers are the recommended way to use the 1.2 release.
 
 Download the latest installer from GitHub Releases in the intended project repository:
-- macOS Apple Silicon: `DND-Campaign-Presenter-1.2.3-macOS.dmg`
-- Windows x64: `DND-Campaign-Presenter-1.2.3-Windows-x64-Setup.exe`
+- macOS Apple Silicon: `DND-Campaign-Presenter-1.2.4-macOS.dmg`
+- Windows x64: `DND-Campaign-Presenter-1.2.4-Windows-x64-Setup.exe`
 
 Unsigned release note:
 - macOS may warn that the app is from an unidentified developer.
@@ -35,7 +35,7 @@ Unsigned release note:
 
 ### Windows
 
-1. Run `DND-Campaign-Presenter-1.2.3-Windows-x64-Setup.exe`.
+1. Run `DND-Campaign-Presenter-1.2.4-Windows-x64-Setup.exe`.
 2. Complete the installer steps.
 3. Launch the app from the Start Menu or desktop shortcut.
 4. If SmartScreen warns on first launch, choose the option to continue if you trust the download source.

@@ -93,7 +93,8 @@ You build clips in the timeline, trigger encounters from battle markers, then re
   - `Manage Initiative...` opens Initiative Manager for quick initiative entry and turn-order updates. It is also available from `View -> Manage Initiative...`.
   - In Initiative Manager, use `Set Teams...` to create `0-8` team buckets and drag tokens between buckets.
   - Team assignments affect combat hostility checks (same-team tokens do not trigger opportunity attacks against each other).
-  - `Full Manual` disables initiative requirements plus turn / movement / action enforcement and combat automations until you turn it back off.
+  - `Full Manual` enables every manual combat control at once. You can assign it a hotkey in `Edit -> Hotkey Settings...` for live encounter toggling.
+  - `Manual Controls...` lets you independently handle initiative requirements, turn enforcement, movement rules, action restrictions, and combat automations. These choices update immediately and are saved with the encounter.
   - `Apply` validates initiative values and applies initiative/team changes together.
   - `Refresh` reloads the current encounter state into the Initiative Manager.
   - Initiative Manager can also `Generate New Token...` during an active encounter, choose how many to create, place each token on the map, then use `Set Generated Token Values` for each token (in placement order) to name them, set combat values (including token size / footprint), choose token art from the asset bin, and set visual fit / status values.
@@ -180,9 +181,9 @@ You build clips in the timeline, trigger encounters from battle markers, then re
   - `Esc` cancels selection modes first, otherwise ends encounter
 
 ## 11) Combat Rules Implemented in Tooling
-- Start Combat requires initiative set for alive tokens unless `Full Manual` is enabled.
+- Start Combat requires initiative set for alive tokens unless `Full Manual` or the `Initiative requirements` manual control is enabled.
 - Initiative order sorting: initiative roll first, then DEX bonus tie-break.
-- In active combat, token actions are constrained by turn and status (with manual off-turn reaction support for `Single Target Attack...` when a reaction is available). `Full Manual` can temporarily disable these enforcement checks.
+- In active combat, token actions are constrained by turn and status (with manual off-turn reaction support for `Single Target Attack...` when a reaction is available). `Full Manual` can temporarily disable every check, or `Manual Controls...` can disable only the checks you choose.
 - Opportunity attacks:
   - The tool can prompt for opportunity attacks during qualifying movement.
   - Opportunity-attack adjacency checks account for large token footprints.
@@ -214,7 +215,7 @@ You build clips in the timeline, trigger encounters from battle markers, then re
 ## 13) Saving, Loading, and Portability
 - Default save uses packaged `.dcp` format with manifest plus bundled assets.
 - Legacy plain JSON `.dcp` files are still load-compatible.
-- In-progress encounter runtime state is saved and can be restored (for example: initiative order/current round, team assignments, active conditions and tracked durations, player visibility, concentration state, reaction/readied-reaction state during combat, and `Full Manual` mode state).
+- In-progress encounter runtime state is saved and can be restored (for example: initiative order/current round, team assignments, active conditions and tracked durations, player visibility, concentration state, reaction/readied-reaction state during combat, `Full Manual` mode, and individual manual-control choices).
 - Runtime encounter state also preserves placed-token display data such as footprint size, visual fit, and token rotation.
 - If referenced source assets are missing at save time, unresolved paths may remain for troubleshooting.
 
@@ -222,7 +223,7 @@ You build clips in the timeline, trigger encounters from battle markers, then re
 - No audio playback: app can continue in no-audio mode if mixer init fails.
 - Token not in Tokens tab: verify the filename includes a token marker such as `(token)`, or import with the Token filter and a supported token extension.
 - Large token looks blurry when resized: higher-resolution source token art gives better results; the app now scales from the source image, but low-res source art will still look soft when enlarged.
-- Combat will not start: open DM Panel -> `Manage Initiative...` and set initiative for each alive token, or enable `Full Manual` if you want to run the encounter without rule enforcement.
+- Combat will not start: open DM Panel -> `Manage Initiative...` and set initiative for each alive token, enable `Full Manual`, or enable only `Initiative requirements` in `Manual Controls...`.
 - AOE attack won't start: after choosing `AOE Attack...`, click a valid grid square on the map for the origin.
 - AOE resolves no targets: in `Select AOE Hits`, check at least one target before clicking OK.
 - Off-turn reaction attack not available: the token may be incapacitated/not alive, combat may be inactive, or that token's reaction may already be spent this round.
